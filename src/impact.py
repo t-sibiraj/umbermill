@@ -771,6 +771,10 @@ class ImpactSelector:
                         independent_readers = observed | separate
         if projected_readers is not None:
             readers = projected_readers
+            if independent_readers is not None and path.startswith("sqlglot/executor/") and len(change.old_lines) == 1:
+                from .operand_equivalence import equivalent as same_operands
+                if same_operands(self, path, change, source, replacement):
+                    return readers | independent_readers, "equivalent observed primitive operands and source readers"
             if len(change.old_lines) == 1 and path in self._length_sites:
                 line = str(next(iter(change.old_lines)))
                 sites = self._length_sites[path].get(line)
@@ -859,6 +863,13 @@ class ImpactSelector:
                     uncertain_load = "changed function can run during module loading or test collection"
                     break
         if uncertain_load is not None:
+            if (single_file and path.startswith("sqlglot/dialects/") and independent_readers is not None
+                    and projected_readers is not None and self.granularity == "function"
+                    and any("**{" in line or "| {" in line for hunk in change.hunks
+                            for line in hunk.lines if line[:1] in {"+", "-"})):
+                from .mapping_value import same_mapping
+                if same_mapping(path, source, replacement, change.old_lines):
+                    return projected_readers | independent_readers, "unchanged ordered dialect mapping and metadata readers"
             if (single_file and self.granularity == "function" and self._flow_index
                     and projected_readers is not None and len(change.old_lines) == 1
                     and not change.inserted_after):

@@ -63,6 +63,8 @@ def main() -> int:
         output = []
         plain_output = []
         schedules = {}
+        child_test = nodeids.get("tests/dialects/test_dialect.py::TestDialect::test_lazy_load")
+        child_proof = None
         from .runtime_checks import RuntimeChecks
         checks=RuntimeChecks(args.source_root,durations,nodeids) if isinstance(selector,ImpactSelector) and not selector.unavailable else None
         primitive = None
@@ -125,26 +127,45 @@ def main() -> int:
                 except (OSError,ValueError,KeyError,TypeError,UnsupportedPatch,SyntaxError,RecursionError):
                     pass
             passed=set()
-            process_guard = False
+            shared_state_reason = None
             if checks is not None:
                 from .process_state import uncertain_process_state
-                process_guard = uncertain_process_state(patch, selector)
-            if process_guard:
-                selection = Selection(sorted(durations), "changed process environment can affect later tests", True)
+                from .registry_state import uncertain_registry_state
+                if uncertain_registry_state(patch, selector):
+                    shared_state_reason = "changed dialect registry observer can affect later tests"
+                elif uncertain_process_state(patch, selector):
+                    shared_state_reason = "changed process environment can affect later tests"
+            if shared_state_reason:
+                selection = Selection(sorted(durations), shared_state_reason, True)
             elif checks is not None:
                 try:
                     passed=checks.passing(patch,selection,selector)
                 except Exception:
                     # The original set remains the fallback for unknown receipts or setup failures.
                     checks.usable=False
-            if not process_guard and primitive is not None and primitive.passing(selector, patch, selection):
+            if not shared_state_reason and primitive is not None and primitive.passing(selector, patch, selection):
                 passed.add(primitive.number)
-            if not process_guard and executor_phases is not None:
+            if not shared_state_reason and executor_phases is not None:
                 passed.update(executor_phases.passing(selector, patch, selection))
             key=tuple(n for n in selection.tests if n not in passed)
             if key not in schedules:
                 schedules[key] = schedule_tests(key, durations)
             workers = schedules[key]
+            # On a single occupied worker each proved pass saves its full duration.
+            if (not shared_state_reason and checks is not None and len(workers) == 1
+                    and child_test in workers[0] and not selection.fallback):
+                try:
+                    if child_proof is None:
+                        from .process_proof import FreshProcess
+                        child_proof = FreshProcess(args.maps.with_name("fresh-process.json.gz"), nodeids)
+                    if child_proof.passing(selector, patch, selection):
+                        passed.add(child_test)
+                        key = tuple(n for n in key if n != child_test)
+                        if key not in schedules:
+                            schedules[key] = schedule_tests(key, durations)
+                        workers = schedules[key]
+                except (OSError, ValueError, KeyError, TypeError):
+                    child_test = None
             if slack:
                 plain_output.append(json.dumps({"commit": path.stem, "workers": workers}, separators=(",", ":")))
                 try:

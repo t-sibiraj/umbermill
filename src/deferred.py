@@ -37,7 +37,7 @@ def warning_free(path: str, source: str) -> bool:
         return False
 
 
-def callback_change(before: CodeType, after: CodeType, *, site_lines=False):
+def callback_change(before: CodeType, after: CodeType, *, site_lines=False, observed_body=False):
     """Return one callback only when every enclosing executable remains identical."""
     if sys.implementation.name != "cpython" or sys.version_info[:2] != (3, 13):
         return None
@@ -64,7 +64,7 @@ def callback_change(before: CodeType, after: CodeType, *, site_lines=False):
                     or old.co_qualname != new.co_qualname or scrub(old) != scrub(new)):
                 return False
             return all(compare(left, right) for left, right in zip(old_children, new_children))
-        if not (old.co_name == "<lambda>" or ".<locals>." in old.co_qualname):
+        if not observed_body and not (old.co_name == "<lambda>" or ".<locals>." in old.co_qualname):
             return False
         if old.co_flags & (inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR):
             return False
@@ -130,6 +130,10 @@ def callback_change(before: CodeType, after: CodeType, *, site_lines=False):
     lines = {line for _, _, line in leaf.co_lines() if line is not None}
     if identities == 1 and lines:
         exclusive = lines - other_lines
+        if observed_body:
+            reached = {line for start,end,line in leaf.co_lines()
+                       if line is not None and any(start <= offset < end for offset in differing_offsets)}
+            return (key, reached) if reached else None
         if site_lines:
             # A line-level hit overapproximates execution of a changed instruction.
             # Shared definition/class-construction lines cannot identify a caller.

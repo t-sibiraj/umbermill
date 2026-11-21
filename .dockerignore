@@ -17,3 +17,5 @@
 !maps/rule-inputs.tar.gz
 !requirements.lock
 !maps/executor-phases.json.gz
+!maps/operand-observations.json.gz
+!maps/fresh-process.json.gz
