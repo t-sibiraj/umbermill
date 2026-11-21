@@ -79,9 +79,11 @@ class ReaderIndex:
         self.size = size
         self.paths = data["paths"]
         self.guard = number(data["guard"], size)
+        self.position_guard_exceptions = data.get("position_guard_exceptions", {})
         self.operators = data.get("operators", {})
         self.lines = data.get("lines", {})
         self.untraced = data.get("untraced", {})
+        self.absent_cold_sources = {p: number(v, size) for p, v in data.get("absent_cold_sources", {}).items()}
 
     def changed(self, path, before, after, *, guard=True):
         row = self.paths.get(path)

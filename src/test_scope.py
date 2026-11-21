@@ -154,6 +154,65 @@ def import_stop_only(old, new):
     )
 
 
+def leading_subtest(old, new):
+    """Recognize one new literal subtest at entry to an existing unittest method."""
+    before = old.splitlines(keepends=True)
+    after = new.splitlines(keepends=True)
+    count = len(after) - len(before)
+    if not 2 <= count <= 8:
+        return None
+    split = next((i for i, (a, b) in enumerate(zip(before, after)) if a != b), len(before))
+    if before[split:] != after[split + count:]:
+        return None
+    text = "".join(after[split:split + count])
+    if not text.isascii() or len(text) > 512 or "\t" in text or "\r" in text:
+        return None
+    owner = assertion_owner(old, new)
+    if owner is None:
+        return None
+    cls, name, first = owner
+    tree = ast.parse(new)
+    typ = next(item for item in tree.body if isinstance(item, ast.ClassDef) and item.name == cls)
+    if typ.keywords or any(not isinstance(item, ast.FunctionDef) for item in typ.body):
+        return None
+    hooks = {"setUp", "tearDown", "setUpClass", "tearDownClass", "run", "addSubTest", "subTest", "fail"}
+    if any(item.name in hooks or item.name.startswith(("__", "assert")) for item in typ.body):
+        return None
+    item = next(method for method in typ.body if method.name == name)
+    if item.decorator_list or item.lineno != first or [arg.arg for arg in item.args.args] != ["self"]:
+        return None
+    block = item.body[0]
+    if not isinstance(block, ast.With) or (block.lineno, block.end_lineno) != (split + 1, split + count):
+        return None
+    # Resource use and exception formatting for the added subtest must be bounded.
+    # The existing assertion matcher restricts every call to a TestCase primitive.
+    for node in ast.walk(block):
+        if isinstance(node, ast.Constant) and type(node.value) not in {str, int, bool, type(None)}:
+            return None
+        if isinstance(node, (ast.List, ast.Set, ast.Tuple, ast.Dict, ast.UnaryOp, ast.BinOp)):
+            return None
+    return cls + "." + name
+
+
+def independent_methods(selector, change, row, old, new, guards):
+    observed = row.get("isolated_method_readers")
+    if not observed or not row["leaf"] or row.get("foreign") is None:
+        return None
+    owner = leading_subtest(old, new)
+    if owner is None:
+        return None
+    from .deferred import warning_free
+    if not warning_free(change.old_path, old) or not warning_free(change.old_path, new):
+        return None
+    baseline, _ = selector._change_tests(change, allow_fixture_projection=True)
+    retained = guards | sum(1 << number for number in row["foreign"])
+    eligible = sum(1 << number for number, entered in observed if owner not in entered)
+    accepted = (baseline & ~eligible) | retained
+    if accepted == (baseline | guards):
+        return None
+    return accepted, "independent test methods with observed pytest location readers"
+
+
 def pick(selector, patch, table):
     changes = parse_patch(patch)
     if len(changes) != 1:
@@ -185,6 +244,9 @@ def pick(selector, patch, table):
             guards | selector._tests_by_file.get(p, 0) | sum(1 << n for n in row["foreign"]),
             "leaf test module terminates at EOF",
         )
+    independent = independent_methods(selector, c, row, old, new, guards)
+    if independent is not None:
+        return independent
     owner = assertion_owner(old, new)
     if owner is None or row.get("metadata") is None:
         return None

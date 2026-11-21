@@ -20,6 +20,13 @@ class GuardMasks:
             path, line, _ = site.rsplit("|", 2)
             self.by_path.setdefault(path, set()).add(int(line))
         self.sites = index["sites"]
+        multipart = index.get("multipart", {})
+        self.multipart_sites = multipart.get("sites", {})
+        self.multipart_pool = 0
+        for number in multipart.get("pool", []):
+            if type(number) is not int or number < 0:
+                raise ValueError("invalid multipart worker owner")
+            self.multipart_pool |= 1 << number
         self.pool = 0
         for stats in index["stats"]:
             for n in stats["pool_users"]:

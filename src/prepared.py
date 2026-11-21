@@ -17,6 +17,8 @@ INDEX_FIELDS = (
     "_collection_sites",
     "_source_hashes",
     "_relation_tokens",
+    "_root_documents",
+    "_length_sites",
     "_relation_sites",
     "_position_readers",
     "_test_sources",

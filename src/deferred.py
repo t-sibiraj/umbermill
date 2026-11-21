@@ -20,6 +20,10 @@ def _same_constant(left, right):
 @lru_cache(32)
 def compile_source(path: str, source: bytes):
     # Multiple independent proofs inspect the same immutable source pair.
+    from .compiled import baseline_code
+    frozen = baseline_code(path, source)
+    if frozen is not None:
+        return frozen
     with warnings.catch_warnings(record=True) as diagnostics:
         warnings.simplefilter("always")
         result = compile(source, path, "exec", dont_inherit=True)

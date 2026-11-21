@@ -4,6 +4,8 @@ Umbermill selects Python tests from an independent patch and a baseline dependen
 
 The map records baseline test execution, imports, and fixture reads. Tests with incomplete evidence stay eligible. The scheduler balances the selected tests across workers using the supplied timings.
 
+Small eligible selections run in isolated processes against a reconstructed patch. For covered unary optimizer rules, the image verifies recorded expression states against pristine SQLGlot during the build and replays eligible states at runtime. Missing outcomes, expensive probes and failed lifecycle checks retain the original selection.
+
 ## Credits
 
 The test inventory and interchange format come from [Builders](https://www.joinbuilders.org/buildathon). Source verification uses the [pinned SQLGlot revision](https://github.com/tobymao/sqlglot/tree/eb11aec4be8cb2122afe713a4816662c3f0fb2fa). The upstream MIT license is retained in the image. Baseline measurements used [pytest](https://pytest.org/) and [coverage.py](https://coverage.readthedocs.io/). See [LICENSE](LICENSE) for this implementation.

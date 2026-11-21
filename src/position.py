@@ -195,6 +195,19 @@ def qualify_parts(selector, parts, *, mode="observed_class", overrides=None):
                 or not simple_operator_change(selector._source(path), apply_change(selector._source(path), c))
             ):
                 return None
+            from .composition import qualified as qualify_behavioral_sibling
+            if sum(1 for _, _, reason in parts if reason in (
+                "changed function callers plus text readers",
+                "changed statement callers plus text readers",
+            )) == 1:
+                coarse = (mask | selector._files.get(path, 0) | selector._collection.get(path, 0)
+                          | selector._reads.get(path, 0))
+                bounded = qualify_behavioral_sibling(selector, c, coarse)
+                if bounded is not None:
+                    # Genuine predicate, source, executor and collection observations
+                    # are retained even when a coarse dependency omitted them.
+                    selected |= bounded
+                    continue
             # Cross-file empirical guard: an existing operator may enable an
             # observer absent from the normal baseline path through its caller.
             selected |= (
@@ -222,6 +235,35 @@ def qualify_parts(selector, parts, *, mode="observed_class", overrides=None):
             raw |= data
         if mode.startswith("oldreads"):
             raw |= selector._reads.get(path, 0)
+        if len(parts) == 1 and selector._isolated_index and selector._reader_index:
+            # Only drop a generic guard when neither its complete cold process tree
+            # nor the ordinary per-test trace accessed this program. Keep actual
+            # text/code observers and any change in class location constants.
+            absent = selector._isolated_index.absent_cold_sources.get(path, 0)
+            absent &= ~(selector._files.get(path, 0) | selector._collection.get(path, 0))
+            if raw & absent:
+                before = selector._source(path)
+                after = apply_change(before, c)
+                if position_only(path, before, after, allow_class_line=False):
+                    watched = selector._reader_index.changed(path, before, after, guard=False)
+                    if watched is not None:
+                        raw &= ~(absent & ~watched)
+        # Keep existing non-guard observers. Only pure source-position changes without
+        # modified class first-line constants qualify for the additional cold evidence.
+        warm = selector._reader_index
+        cold = selector._isolated_index
+        if len(parts) == 1 and warm and cold and path in cold.position_guard_exceptions:
+            previous = selector._source(path)
+            following = apply_change(previous, c)
+            if position_only(path, previous, following, allow_class_line=False):
+                warm_hits = warm.changed(path, previous, following, guard=False)
+                cold_hits = cold.changed(path, previous, following, guard=False)
+                if warm_hits is not None and cold_hits is not None:
+                    exceptional = sum(1 << n for n in cold.position_guard_exceptions[path])
+                    from .readers import number
+                    untraced = number(cold.untraced.get(path, ""), cold.size)
+                    if untraced is not None:
+                        raw = (raw & ~warm.guard) | warm_hits | cold_hits | exceptional | untraced
         selected |= raw
         qualified.append(path)
     return selected, qualified

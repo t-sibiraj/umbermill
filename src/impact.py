@@ -195,6 +195,73 @@ def _same_outline(before: ast.Module, after: ast.Module) -> bool:
     return True
 
 
+def _same_outline_after_body_insertion(change, old, new):
+    """Recognize pinned type-ignore directives shifted by an existing method's first statement."""
+    if (len(change.hunks) != 1 or change.old_lines
+            or len(change.inserted_after) != 1 or len(old.bodies) != len(new.bodies)):
+        return False
+    (anchor,) = change.inserted_after
+    before = old.raw.splitlines(keepends=True)
+    after = new.raw.splitlines(keepends=True)
+    shift = len(after) - len(before)
+    if (shift <= 0 or before[:anchor] != after[:anchor] or
+            before[anchor:] != after[anchor + shift:]):
+        return False
+    previous = [(t.lineno + (shift if t.lineno > anchor else 0), t.tag) for t in old.outline.type_ignores]
+    present = [(t.lineno, t.tag) for t in new.outline.type_ignores]
+    if previous != present:
+        return False
+    changed = [(a, b) for a, b in zip(old.bodies, new.bodies) if not a.same_statements(b)]
+    if len(changed) != 1:
+        return False
+    a, b = changed[0]
+    offset = int(isinstance(a.syntax[0], ast.Expr) and isinstance(a.syntax[0].value, ast.Constant)
+                 and isinstance(a.syntax[0].value.value, str))
+    if len(a.syntax) <= offset or len(b.syntax) != len(a.syntax) + 1:
+        return False
+    added = b.syntax[offset]
+    literal_return = isinstance(added, ast.Return) and (
+        added.value is None or isinstance(added.value, ast.Constant))
+    literal_raise = isinstance(added, ast.Raise) and added.cause is None and (
+        added.exc is None or isinstance(added.exc, ast.Call) and isinstance(added.exc.func, ast.Name)
+        and added.exc.func.id in {"AssertionError", "ValueError", "TypeError", "RuntimeError", "NotImplementedError"}
+        and not added.exc.keywords and all(isinstance(a, ast.Constant) for a in added.exc.args))
+    if (not (literal_return or literal_raise)
+            or not anchor < added.lineno <= added.end_lineno <= anchor + shift
+            or not _same_outline(a.syntax, b.syntax[:offset] + b.syntax[offset + 1:])):
+        return False
+    if not _same_outline(old.outline.body, new.outline.body):
+        return False
+    return a, added
+
+
+def _owner_only_unreachable_children(old, new, leading, eager):
+    """Check whether an early exit only removed nested code from its own frame."""
+    if not leading:
+        return False
+    body, _ = leading
+    from .readers import get_codes
+    keys = [k for k, codes in get_codes(old).items()
+            if len(codes) == 1 and codes[0].co_name == body.name and any(
+                ln is not None and body.first_line <= ln <= body.last_line for _, _, ln in codes[0].co_lines())]
+    if len(keys) != 1 or keys[0] in eager:
+        return False
+    key = keys[0]
+
+    def compatible(a, b):
+        fields = ("co_qualname", "co_flags", "co_varnames", "co_cellvars", "co_freevars",
+                  "co_argcount", "co_kwonlyargcount", "co_posonlyargcount")
+        if any(getattr(a, f) != getattr(b, f) for f in fields):
+            return False
+        if (a.co_qualname, a.co_firstlineno) == key:
+            return a.co_firstlineno == b.co_firstlineno
+        ac = [c for c in a.co_consts if isinstance(c, CodeType)]
+        bc = [c for c in b.co_consts if isinstance(c, CodeType)]
+        return len(ac) == len(bc) and all(compatible(x, y) for x, y in zip(ac, bc))
+
+    return compatible(old, new)
+
+
 def _describe_module(path: str, source: str) -> ModuleShape:
     # Compile bytes to honor the same encoding declarations as Python's loader.
     raw = source.encode("utf-8")
@@ -302,6 +369,58 @@ def _test_hits(sites: dict[int, int], first: int, last: int) -> int:
     return hits
 
 
+def _replaced_expression_statement(change, before, after):
+    """Locate a single existing expression whose evaluation must precede any divergence."""
+    if len(change.old_lines) != 1 or change.inserted_after or len(change.hunks) != 1:
+        return None
+    hunk = change.hunks[0]
+    if sum(s.startswith('-') for s in hunk.lines) != 1 or sum(s.startswith('+') for s in hunk.lines) != 1:
+        return None
+    line, = change.old_lines
+
+    def argument_shape(node):
+        # Permit ordinary name/literal call argument edits without introducing any new calls,
+        # operators or binding forms. Preserve dynamic expressions and unpacking exactly.
+        if isinstance(node, ast.Call):
+            simple = (ast.Name, ast.Constant)
+            args = tuple(None if isinstance(arg, simple) else argument_shape(arg)
+                         for arg in node.args)
+            keywords = tuple((kw.arg, argument_shape(kw.value)) for kw in node.keywords
+                             if kw.arg is None or not isinstance(kw.value, simple))
+            return ("call", argument_shape(node.func), args, keywords)
+        if isinstance(node, ast.AST):
+            return type(node), tuple(argument_shape(v) for _, v in ast.iter_fields(node))
+        if isinstance(node, list):
+            return tuple(argument_shape(v) for v in node)
+        return node
+
+    def affected(statements):
+        eligible = (ast.Return, ast.Assign, ast.AnnAssign, ast.Expr)
+        matches = [node for statement in statements for node in ast.walk(statement)
+                   if isinstance(node, eligible) and node.lineno <= line <= node.end_lineno]
+        if len(matches) != 1:
+            return None
+        statement = matches[0]
+        value = statement.value
+        if value is None or not value.lineno <= line <= value.end_lineno:
+            return None
+        if isinstance(statement, ast.Expr) and isinstance(value, ast.Constant):
+            return None  # a docstring can change metadata without executing the statement
+        if any(isinstance(n, (ast.Lambda, ast.NamedExpr, ast.comprehension, ast.Await, ast.Yield,
+                              ast.YieldFrom)) for n in ast.walk(value)):
+            return None
+        shape = [(key, ast.dump(item) if isinstance(item, ast.AST) else
+                  tuple(ast.dump(i) for i in item) if isinstance(item, list) else item)
+                 for key, item in ast.iter_fields(statement) if key != 'value']
+        stars = [ast.dump(n) for n in ast.walk(value) if isinstance(n, ast.Starred)]
+        return type(statement), statement.lineno, statement.end_lineno, shape, stars, argument_shape(value)
+
+    old = affected(before)
+    if old is None or old != affected(after):
+        return None
+    return {(old[1], old[2])}
+
+
 def _accepts_fixture_projection(source: str) -> bool:
     module = ast.parse(source)
     functions = {}
@@ -386,7 +505,7 @@ class ImpactSelector:
             from .prepared import install
             if not install(self, maps_path, nodeids):
                 self._read_map(maps_path, nodeids)
-            self._observers(maps_path)
+            self._observers(maps_path, nodeids)
             self.unavailable = ""
         except (OSError, EOFError, TypeError, ValueError, RecursionError) as exc:
             self.unavailable = f"invalid impact map: {exc}"
@@ -446,6 +565,9 @@ class ImpactSelector:
         self._files = self._read_path_map(payload, "files", numbers)
         self._collection = self._read_path_map(payload, "collection", numbers)
         self._reads = self._read_path_map(payload, "reads", numbers)
+        self._root_documents = (self._read_path_map(payload, "root_document_readers", numbers)
+                                if "root_document_readers" in payload else {})
+        self._length_sites = payload.get("length_boundaries", {})
         self._filtered_fixture_reads = self._read_path_map(payload, "filtered_fixture_reads", numbers) if "filtered_fixture_reads" in payload else {}
         self._paired_fixture_reads = self._read_path_map(payload, "paired_fixture_reads", numbers) if "paired_fixture_reads" in payload else {}
 
@@ -487,7 +609,11 @@ class ImpactSelector:
             self._deferred = self._read_path_map(payload, "deferred_baseline", deferred_record)
         self.unavailable = ""
 
-    def _observers(self, path: Path) -> None:
+    def _observers(self, path: Path, nodeids=None) -> None:
+        self._flow_index = None
+        if nodeids and path.with_name("flow.json.gz").is_file():
+            from .flow import FlowIndex
+            self._flow_index = FlowIndex(path.with_name("flow.json.gz"), nodeids)
         self._reader_index = None
         if path.with_name("readers.json.gz").is_file():
             from .readers import ReaderIndex
@@ -529,6 +655,14 @@ class ImpactSelector:
             paths = {change.old_path for change in changes}
             if len(paths) != len(changes):
                 raise UnsupportedPatch("duplicate old path in a patch")
+            if len(changes) > 1 and self.granularity == "function" and paths <= self._root_documents.keys():
+                # Each tracked file retains its name and type, so the observed
+                # directory projection is unchanged. Include every content reader.
+                for change in changes:
+                    apply_change(self._source(change.old_path), change)
+                    selected |= self._root_documents[change.old_path]
+                return Selection([n for n in self.all_tests if selected & (1 << n)],
+                                 "observed consumers of unchanged document paths", False)
             if len(changes)==1 and changes[0].old_path in self._test_sources:
                 from .test_scope import pick
                 proof=pick(self,patch,self._test_sources)
@@ -556,6 +690,11 @@ class ImpactSelector:
         path = change.old_path
         if change.added or change.deleted or path != change.new_path:
             raise UnsupportedPatch("file added, removed, or renamed")
+        if single_file and self.granularity == "function" and path in self._root_documents:
+            # The mapped regular file keeps its name and type. The full baseline
+            # includes startup and child processes, plus directory access.
+            apply_change(self._source(path), change)
+            return self._root_documents[path], "observed document and directory consumers"
         if not path.startswith(("sqlglot/", "tests/")):
             raise UnsupportedPatch("unmodeled configuration or coverage scope")
         if PurePosixPath(path).name == "conftest.py":
@@ -577,6 +716,13 @@ class ImpactSelector:
                         independent_readers = observed | separate
         if projected_readers is not None:
             readers = projected_readers
+            if len(change.old_lines) == 1 and path in self._length_sites:
+                line = str(next(iter(change.old_lines)))
+                sites = self._length_sites[path].get(line)
+                if sites:
+                    from .length_boundary import equivalent
+                    if equivalent(path, source, replacement, sites):
+                        return readers, "equivalent integer bound on builtin lengths"
         if single_file and (path in self._deferred or projected_readers is not None) and len(change.old_lines) == 1 and self._relation_sites:
             line = next(iter(change.old_lines))
             if str(line) in self._relation_sites.get(path, {}):
@@ -639,7 +785,9 @@ class ImpactSelector:
         new = _describe_module(path, replacement)
         uncertain_load = None
         changed = []
-        if not _same_outline(old.outline, new.outline):
+        same_outline = _same_outline(old.outline, new.outline)
+        leading = None if same_outline else _same_outline_after_body_insertion(change, old, new)
+        if not (same_outline or leading):
             if old.loading_checks != new.loading_checks:
                 uncertain_load = "changed module-load imports or failure checks can affect the full roster"
             else:
@@ -656,6 +804,14 @@ class ImpactSelector:
                     uncertain_load = "changed function can run during module loading or test collection"
                     break
         if uncertain_load is not None:
+            if (single_file and self.granularity == "function" and self._flow_index
+                    and projected_readers is not None and len(change.old_lines) == 1
+                    and not change.inserted_after):
+                defaults = self._flow_index.default_consumers(path, source, replacement)
+                if defaults is not None:
+                    if independent_readers is not None:
+                        readers = independent_readers | self._reader_index.guard
+                    return readers | defaults, "observed default argument consumers and source readers"
             if single_file and self.granularity == "function" and path in self._deferred and path.startswith("sqlglot/"):
                 from .deferred import callback_change, warning_free
                 callback = callback_change(old.bytecode, new.bytecode, site_lines=True)
@@ -687,13 +843,26 @@ class ImpactSelector:
         if self.granularity == "file" or path.startswith("tests/") or path.endswith("/__init__.py"):
             return file_tests, "observed file dependents"
         if old.closure_layout != new.closure_layout:
-            return file_tests, "changed closure or class creation"
+            if leading is None:
+                leading = _same_outline_after_body_insertion(change, old, new)
+            evidence = self._deferred.get(path)
+            if (not evidence or not self._reader_index or not self._isolated_index or
+                    not _owner_only_unreachable_children(old_code, new_code, leading, evidence[0])):
+                return file_tests, "changed closure or class creation"
+            warm = self._reader_index.changed(path, source, replacement)
+            cold = self._isolated_index.changed(path, source, replacement)
+            if warm is None or cold is None:
+                return file_tests, "unresolved source or compiler metadata readers"
+            readers |= warm | cold | (self._position_readers or {}).get(path, 0)
+            if independent_readers is not None:
+                independent_readers |= readers
         sites = self._sites.get(path, {})
         if independent_readers is not None and changed:
             ranges=[(body.first_line,body.last_line) for body,_ in changed]
             readers = independent_readers | self._isolated_index.executed_ranges(path,ranges)
         selected = readers
         used_statement_sites = False
+        used_dominator = False
         for before, after in changed:
             if before.has_definition_hook or before.binding_details() != after.binding_details():
                 return file_tests, "function changes affect binding or execution mode"
@@ -703,6 +872,17 @@ class ImpactSelector:
             statements = _changed_statement_ranges(
                 before.syntax, after.syntax, guarded=self.granularity != "statement"
             )
+            expression = None
+            if (single_file and self.granularity == "function" and projected_readers is not None
+                    and (statements is None or self._flow_index
+                         and self._flow_index.has_tail(path, before))):
+                expression = _replaced_expression_statement(change, before.syntax, after.syntax)
+                if expression:
+                    from .deferred import warning_free
+                    if not (warning_free(path, source) and warning_free(path, replacement)):
+                        expression = None
+                if statements is None:
+                    statements = expression
             if statements:
                 statement_callers = [_test_hits(sites, first, last) for first, last in statements]
                 if all(statement_callers):
@@ -710,7 +890,15 @@ class ImpactSelector:
                     callers = 0
                     for hits in statement_callers:
                         callers |= hits
+            if expression and self._flow_index:
+                first, _ = next(iter(expression))
+                affected = self._flow_index.tail_consumers(path, before, first)
+                if affected is not None:
+                    callers &= affected
+                    used_dominator = True
             selected |= callers
+        if used_dominator:
+            return selected, "observed tail after early return plus source readers"
         if not changed:
             return file_tests, "source positions may affect file dependents"
         return selected, "changed statement callers plus text readers" if used_statement_sites else "changed function callers plus text readers"

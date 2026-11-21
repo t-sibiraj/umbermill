@@ -55,6 +55,7 @@ def main() -> int:
             guard_data=json.loads(gzip.decompress(guard_map.read_bytes()))
             if guard_data.get("base_commit")==BASE_COMMIT:
                 guard_index=GuardMasks(guard_data,selector._reader_index.guard)
+                selector._composition_guards = guard_index
         commits = args.data_dir / "commits"
         if not commits.is_dir():
             raise ValueError("commits directory is missing")
@@ -62,8 +63,22 @@ def main() -> int:
         output = []
         plain_output = []
         schedules = {}
+        from .runtime_checks import RuntimeChecks
+        checks=RuntimeChecks(args.source_root,durations,nodeids) if isinstance(selector,ImpactSelector) and not selector.unavailable else None
         for path in sorted(commits.glob("*.patch")):
-            patch = path.read_text(encoding="utf-8", errors="replace")
+            try:
+                patch = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                # Replacement characters can hide a collection failure in the actual source.
+                key = tuple(sorted(durations))
+                if key not in schedules:
+                    schedules[key] = schedule_tests(key, durations)
+                record = json.dumps({"commit": path.stem, "workers": schedules[key]}, separators=(",", ":"))
+                output.append(record)
+                if slack:
+                    plain_output.append(record)
+                print(f"{path.stem}: {len(key)}/{len(durations)} tests; patch is not UTF-8", file=sys.stderr)
+                continue
             selection = selector.select(patch)
             if field_selector and selection.fallback:
                 try:
@@ -95,7 +110,14 @@ def main() -> int:
                                         selection=Selection([n for n in selection.tests if (mask>>n)&1],"observed condition and worker dependencies",False)
                 except (OSError,ValueError,KeyError,TypeError,UnsupportedPatch,SyntaxError,RecursionError):
                     pass
-            key = tuple(selection.tests)
+            passed=set()
+            if checks is not None:
+                try:
+                    passed=checks.passing(patch,selection,selector)
+                except Exception:
+                    # The original set remains the fallback for unknown receipts or setup failures.
+                    checks.usable=False
+            key=tuple(n for n in selection.tests if n not in passed)
             if key not in schedules:
                 schedules[key] = schedule_tests(key, durations)
             workers = schedules[key]
@@ -107,6 +129,7 @@ def main() -> int:
                         relpath = change.old_path
                         possible |= (selector._files.get(relpath, 0) | selector._reads.get(relpath, 0)
                                      | selector._collection.get(relpath, 0) | selector._tests_by_file.get(relpath, 0))
+                    possible &= ~sum(1 << n for n in passed)
                     workers = slack.fill(workers, possible)
                 except (ValueError, UnsupportedPatch, RecursionError):
                     pass
