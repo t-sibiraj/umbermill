@@ -4,6 +4,8 @@ Umbermill selects Python tests from an independent patch and a baseline dependen
 
 The map records baseline test execution, imports, and fixture reads. Tests with incomplete evidence stay eligible. The scheduler balances the selected tests across workers using the supplied timings.
 
+For module initialization failures, Umbermill combines cold imports with observations from test collection and the running suite. For certain literal changes in the optimizer or executor, it checks the original TPC-DS workload on the recorded platform. The check uses primitive values observed in the preceding tests, the executor test and its worker processes. A changed outcome or an observation the check cannot verify keeps the test on the schedule.
+
 Small eligible selections run in isolated processes against a reconstructed patch. For covered unary optimizer rules, the image verifies recorded expression states against pristine SQLGlot during the build and replays eligible states at runtime. Missing outcomes, expensive probes and failed lifecycle checks retain the original selection.
 
 ## Credits

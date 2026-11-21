@@ -12,6 +12,31 @@ from .probe_worker import bounded_worker, cpu
 from .patches import parse_patch, apply_change
 
 
+def numeric_field_line(change):
+    """Further restrict a proved class-field edit to existing scalar or tuple data."""
+    import ast
+    from .guards import one_line_change
+
+    pair = one_line_change(change)
+    if pair is None:
+        return False
+    try:
+        for line in pair[1:]:
+            lhs, equal, rhs = line.strip().partition("=")
+            if equal and lhs.strip().isidentifier():
+                value = ast.literal_eval(rhs.strip())
+            else:
+                (key, value), = ast.literal_eval("{" + line.strip() + "}").items()
+                if type(key) is not str:
+                    return False
+            elements = value if type(value) is tuple else (value,)
+            if not elements or not all(type(item) in (int, bool) for item in elements):
+                return False
+    except (ValueError, SyntaxError, TypeError, AttributeError, RecursionError):
+        return False
+    return True
+
+
 class RuntimeChecks:
     def __init__(self, root, durations, nodeids):
         self.root = root.resolve()
@@ -95,9 +120,10 @@ class RuntimeChecks:
         if not self.usable or not ids or selection.fallback:
             return set()
         might_replay = "sqlglot/optimizer/" in patch[:256]
-        if not might_replay and (
-            len(ids) > self.limit or sum(self.durations[n] for n in ids) > self.cap
-        ):
+        if not might_replay and len(ids) > self.limit:
+            return set()
+        total_seconds = sum(self.durations[n] for n in ids)
+        if not might_replay and total_seconds > self.budget:
             return set()
         if time.monotonic() >= self.deadline or self.worker_cpu >= self.budget:
             return set()
@@ -159,9 +185,15 @@ class RuntimeChecks:
                 self.rule_checks = RuleChecks(self)
             return self.rule_checks.run(ch, old, new, selection, selector)
         ids = [n for n in ids if not guard >> n & 1]
+        # A complete group can remove the final worker's setup charge. Admit a
+        # larger group only when its estimated run fits the available CPU and
+        # every selection can be checked together in the original order.
         if (
             len(ids) > self.limit
-            or sum(self.durations[n] for n in ids) > self.cap
+            or (total_seconds > self.cap and (
+                reserved or total_seconds > self.group_budget
+                or selection.reason != "observed class field consumers" or not numeric_field_line(ch)
+            ))
             or any(self.uses_pool(self.nodeids[n]) for n in ids)
         ):
             return set()

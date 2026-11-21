@@ -9,5 +9,6 @@
 !maps/readers.json.gz
 !maps/conditions.json.gz
 !maps/isolated.json.gz
+!maps/primitives.json.gz
 !maps/rule-inputs.tar.gz
 !requirements.lock

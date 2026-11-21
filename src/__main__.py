@@ -65,6 +65,13 @@ def main() -> int:
         schedules = {}
         from .runtime_checks import RuntimeChecks
         checks=RuntimeChecks(args.source_root,durations,nodeids) if isinstance(selector,ImpactSelector) and not selector.unavailable else None
+        primitive = None
+        if checks is not None and args.maps.with_name('primitives.json.gz').is_file():
+            from .primitive import PrimitiveObservations
+            try:
+                primitive = PrimitiveObservations(args.maps.with_name('primitives.json.gz'), nodeids)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
         for path in sorted(commits.glob("*.patch")):
             try:
                 patch = path.read_text(encoding="utf-8")
@@ -117,6 +124,8 @@ def main() -> int:
                 except Exception:
                     # The original set remains the fallback for unknown receipts or setup failures.
                     checks.usable=False
+            if primitive is not None and primitive.passing(selector, patch, selection):
+                passed.add(primitive.number)
             key=tuple(n for n in selection.tests if n not in passed)
             if key not in schedules:
                 schedules[key] = schedule_tests(key, durations)

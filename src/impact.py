@@ -565,6 +565,13 @@ class ImpactSelector:
         self._files = self._read_path_map(payload, "files", numbers)
         self._collection = self._read_path_map(payload, "collection", numbers)
         self._reads = self._read_path_map(payload, "reads", numbers)
+        root_names = payload.get("cold_package_root_names", [])
+        if not isinstance(root_names, list) or any(not isinstance(name, str) for name in root_names):
+            raise ValueError("invalid package root names")
+        self._cold_root_names = frozenset(root_names)
+        self._cold_file_dependencies = self._read_path_map(
+            payload, "cold_test_file_dependencies", numbers
+        ) if "cold_test_file_dependencies" in payload else {}
         self._root_documents = (self._read_path_map(payload, "root_document_readers", numbers)
                                 if "root_document_readers" in payload else {})
         self._length_sites = payload.get("length_boundaries", {})
@@ -650,6 +657,7 @@ class ImpactSelector:
         selected = self._unmapped
         reasons: list[str] = []
         parts = []
+        changes = []
         try:
             changes = parse_patch(patch)
             paths = {change.old_path for change in changes}
@@ -682,6 +690,24 @@ class ImpactSelector:
                     selected, qualified = alternative
                     reasons = ["position-only source with observed readers"] if qualified else reasons
         except (OSError, UnsupportedPatch, SyntaxError, UnicodeError, ValueError, RecursionError) as exc:
+            if len(changes) == 1 and self.granularity == "function" and self._reader_index:
+                change = changes[0]
+                path = change.old_path
+                if path == change.new_path and path in self._cold_file_dependencies:
+                    from .failed_imports import immediate_failure
+                    try:
+                        source = self._source(path)
+                        if immediate_failure(path, source, apply_change(source, change),
+                                             self.source_root, self._cold_root_names):
+                            # Keep all warm observations, the cold test-file runs and
+                            # all tests whose baseline subprocesses need a generic guard.
+                            mask = (self._cold_file_dependencies[path] | self._files.get(path, 0)
+                                    | self._reads.get(path, 0) | self._collection.get(path, 0)
+                                    | self._reader_index.guard | self._unmapped)
+                            return Selection([n for n in self.all_tests if mask >> n & 1],
+                                             "cold and warm module dependencies", False)
+                    except (OSError, UnsupportedPatch, SyntaxError, ValueError, RecursionError):
+                        pass
             return self._all(f"uncertain impact: {exc}")
         tests = [number for number in self.all_tests if selected & (1 << number)]
         return Selection(tests, ", ".join(dict.fromkeys(reasons)), False)
