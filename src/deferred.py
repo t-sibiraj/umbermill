@@ -3,6 +3,7 @@ import dis
 import inspect
 import sys
 import warnings
+from functools import lru_cache
 from types import CodeType
 
 
@@ -14,9 +15,6 @@ def _same_constant(left, right):
     if isinstance(left, tuple):
         return len(left) == len(right) and all(_same_constant(a, b) for a, b in zip(left, right))
     return type(left) in {int, str, bytes, bool} and left == right
-
-
-from functools import lru_cache
 
 
 @lru_cache(32)
@@ -35,11 +33,12 @@ def warning_free(path: str, source: str) -> bool:
         return False
 
 
-def callback_change(before: CodeType, after: CodeType):
+def callback_change(before: CodeType, after: CodeType, *, site_lines=False):
     """Return one callback only when every enclosing executable remains identical."""
     if sys.implementation.name != "cpython" or sys.version_info[:2] != (3, 13):
         return None
     changed = []
+    differing_offsets = set()
 
     def compare(old, new):
         # CPython code equality omits co_qualname and co_stacksize. Require
@@ -95,6 +94,7 @@ def callback_change(before: CodeType, after: CodeType):
                     continue
                 if type(a.argval) is not type(b.argval) or type(a.argval) not in {int, str}:
                     return False
+                differing_offsets.add(a.offset)
                 saw_difference = True
                 continue
             if a.arg == b.arg and type(a.argval) is type(b.argval) and a.argval == b.argval:
@@ -104,6 +104,7 @@ def callback_change(before: CodeType, after: CodeType):
                     return False  # preserve Boolean coercion mode (CPython 3.13)
             else:
                 return False
+            differing_offsets.add(a.offset)
             saw_difference = True
         if saw_difference:
             changed.append(old)
@@ -124,5 +125,12 @@ def callback_change(before: CodeType, after: CodeType):
         stack.extend(c for c in code.co_consts if isinstance(c, CodeType))
     lines = {line for _, _, line in leaf.co_lines() if line is not None}
     if identities == 1 and lines:
-        return key, lines, lines - other_lines
+        exclusive = lines - other_lines
+        if site_lines:
+            # A line-level hit overapproximates execution of a changed instruction.
+            # Shared definition/class-construction lines cannot identify a caller.
+            executed = {line for start,end,line in leaf.co_lines()
+                        if any(start<=offset<end for offset in differing_offsets)}
+            return key, lines, exclusive, executed if executed and executed<=exclusive else set()
+        return key, lines, exclusive
     return None

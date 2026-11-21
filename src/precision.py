@@ -47,16 +47,9 @@ def bindings(tree, symbol):
             and node.func.id in {"exec", "eval", "globals", "locals"}
         ):
             return []
-        if (
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-            and node.name == symbol
-        ):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == symbol:
             sites.append(node)
-        elif (
-            isinstance(node, ast.Name)
-            and isinstance(node.ctx, (ast.Store, ast.Del))
-            and node.id == symbol
-        ):
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)) and node.id == symbol:
             sites.append(node)
         elif isinstance(node, ast.alias) and (node.asname or node.name.split(".")[0]) == symbol:
             sites.append(node)
@@ -136,8 +129,7 @@ def pure_factory(source, tree, left, right):
     return postponed or (
         inner.returns is None
         and all(
-            a.annotation is None
-            for a in [*inner.args.posonlyargs, *inner.args.args, *inner.args.kwonlyargs]
+            a.annotation is None for a in [*inner.args.posonlyargs, *inner.args.args, *inner.args.kwonlyargs]
         )
     )
 
@@ -183,8 +175,7 @@ def delta(path, old, new, source):
             return None
         # The original class body can use a literal via a bare name before class creation.
         if any(
-            isinstance(n, ast.Name) and n.id == field and isinstance(n.ctx, ast.Load)
-            for n in ast.walk(left)
+            isinstance(n, ast.Name) and n.id == field and isinstance(n.ctx, ast.Load) for n in ast.walk(left)
         ):
             return None
         key_value = None
@@ -210,8 +201,7 @@ class FieldSelector:
         self.index = json.loads(gzip.decompress(path.read_bytes()))
         if (
             self.index["base_commit"] != BASE_COMMIT
-            or roster_digest(json.loads(roster_file.read_bytes())["tests"])
-            != self.index["roster_sha256"]
+            or roster_digest(json.loads(roster_file.read_bytes())["tests"]) != self.index["roster_sha256"]
         ):
             raise ValueError("field roster mismatched")
         self.guards = sum(1 << k for k in self.index["guards"])
@@ -222,18 +212,18 @@ class FieldSelector:
         )
 
     def isolated_consumers(self, name, key):
-        module,owner,_=name.split(":",2)
-        rows=self.index.get("isolated_readers", [])
+        module, owner, _ = name.split(":", 2)
+        rows = self.index.get("isolated_readers", [])
         if not rows:
             return None
-        known=set()
-        affected=set()
+        known = set()
+        affected = set()
         for row in rows:
-            n=row["test"]
+            n = row["test"]
             known.add(n)
             if module not in row["loaded"]:
                 continue
-            if module+":"+owner in row["reflection"]:
+            if module + ":" + owner in row["reflection"]:
                 affected.add(n)
                 continue
             if key is None:
@@ -243,16 +233,16 @@ class FieldSelector:
             if name not in row["seen"]:
                 affected.add(n)
                 continue
-            keys=row["keys"].get(name,())
-            if "*" in keys or "="+key in keys:
+            keys = row["keys"].get(name, ())
+            if "*" in keys or "=" + key in keys:
                 affected.add(n)
                 continue
-            for other in set(self.index.get("derived",{}).get(name,())) | set(row["derived"].get(name,())):
-                if other in row["fields"] or other.rsplit(":",1)[0] in row["reflection"]:
+            for other in set(self.index.get("derived", {}).get(name, ())) | set(row["derived"].get(name, ())):
+                if other in row["fields"] or other.rsplit(":", 1)[0] in row["reflection"]:
                     affected.add(n)
                     break
-        covered=sum(1<<n for n in known)
-        return covered,sum(1<<n for n in affected)
+        covered = sum(1 << n for n in known)
+        return covered, sum(1 << n for n in affected)
 
     def narrow(self, patch):
         changes = parse_patch(patch)
@@ -273,13 +263,7 @@ class FieldSelector:
 
     def _change(self, c):
         p = c.old_path
-        if (
-            c.new_path != p
-            or c.added
-            or c.deleted
-            or not p.startswith("sqlglot/")
-            or not p.endswith(".py")
-        ):
+        if c.new_path != p or c.added or c.deleted or not p.startswith("sqlglot/") or not p.endswith(".py"):
             return None
         if p[:-3].replace("/", ".").removesuffix(".__init__") not in self.modules:
             return None
@@ -318,15 +302,15 @@ class FieldSelector:
                 return None
             readers = self.base._reads.get(p, 0) | deferred[1]
         extra = self.guards
-        individual = self.isolated_consumers(name,key)
+        individual = self.isolated_consumers(name, key)
         if individual and self.base._reader_index and self.base._isolated_index:
-            observed=self.base._reader_index.changed(p,before,after,guard=False)
-            cold=self.base._isolated_index.changed(p,before,after)
+            observed = self.base._reader_index.changed(p, before, after, guard=False)
+            cold = self.base._isolated_index.changed(p, before, after)
             if observed is not None and cold is not None:
-                proven, consumers=individual
-                retained=(self.base._reader_index.guard | self.guards) & ~proven
-                readers=observed | cold | retained | consumers
-                extra=0
+                proven, consumers = individual
+                retained = (self.base._reader_index.guard | self.guards) & ~proven
+                readers = observed | cold | retained | consumers
+                extra = 0
         mask = extra | self.base._unmapped | readers
         for e in entries:
             mask |= int.from_bytes(base64.b64decode(e, validate=True), "little")

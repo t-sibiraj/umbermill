@@ -383,7 +383,11 @@ class ImpactSelector:
         if maps_path is None or self.source_root is None:
             return
         try:
-            self._read_map(maps_path, nodeids)
+            from .prepared import install
+            if not install(self, maps_path, nodeids):
+                self._read_map(maps_path, nodeids)
+            self._observers(maps_path)
+            self.unavailable = ""
         except (OSError, EOFError, TypeError, ValueError, RecursionError) as exc:
             self.unavailable = f"invalid impact map: {exc}"
 
@@ -469,14 +473,6 @@ class ImpactSelector:
         self._relation_sites = payload.get("relation_sites", {})
         if not isinstance(self._relation_sites, dict):
             raise ValueError("invalid comparison sites")
-        self._reader_index = None
-        if path.with_name("readers.json.gz").is_file():
-            from .readers import ReaderIndex
-            self._reader_index = ReaderIndex(path.with_name("readers.json.gz"), BASE_COMMIT, len(roster))
-        self._isolated_index = None
-        if path.with_name("isolated.json.gz").is_file():
-            from .readers import ReaderIndex
-            self._isolated_index = ReaderIndex(path.with_name("isolated.json.gz"), BASE_COMMIT, len(roster))
         self._position_readers = self._read_path_map(payload,"position_readers",numbers) if "position_readers" in payload else None
         self._test_sources = payload.get("test_source_observations",{})
         self._deferred = {}
@@ -490,6 +486,16 @@ class ImpactSelector:
                 return {tuple(item) for item in record[0]}, numbers(record[1])
             self._deferred = self._read_path_map(payload, "deferred_baseline", deferred_record)
         self.unavailable = ""
+
+    def _observers(self, path: Path) -> None:
+        self._reader_index = None
+        if path.with_name("readers.json.gz").is_file():
+            from .readers import ReaderIndex
+            self._reader_index = ReaderIndex(path.with_name("readers.json.gz"), BASE_COMMIT, len(self.all_tests))
+        self._isolated_index = None
+        if path.with_name("isolated.json.gz").is_file():
+            from .readers import ReaderIndex
+            self._isolated_index = ReaderIndex(path.with_name("isolated.json.gz"), BASE_COMMIT, len(self.all_tests))
 
     @staticmethod
     def _read_path_map(payload, key, parse=lambda value: value):
@@ -652,13 +658,15 @@ class ImpactSelector:
         if uncertain_load is not None:
             if single_file and self.granularity == "function" and path in self._deferred and path.startswith("sqlglot/"):
                 from .deferred import callback_change, warning_free
-                callback = callback_change(old.bytecode, new.bytecode)
+                callback = callback_change(old.bytecode, new.bytecode, site_lines=True)
                 if callback is not None:
-                    identity, lines, exclusive = callback
+                    identity, lines, exclusive, diff_lines = callback
                     eager, text_readers = self._deferred[path]
                     collection = self._collection_sites.get(path, {})
                     if identity not in eager and all(line not in collection for line in exclusive):
                         sites = self._sites.get(path, {})
+                        if diff_lines and all(sites.get(line,0) for line in diff_lines):
+                            lines=diff_lines
                         callers = 0
                         for line in lines:
                             callers |= sites.get(line, 0)
