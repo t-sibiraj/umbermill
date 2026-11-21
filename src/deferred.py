@@ -16,16 +16,23 @@ def _same_constant(left, right):
     return type(left) in {int, str, bytes, bool} and left == right
 
 
+from functools import lru_cache
+
+
+@lru_cache(32)
+def compile_source(path: str, source: bytes):
+    # Multiple independent proofs inspect the same immutable source pair.
+    with warnings.catch_warnings(record=True) as diagnostics:
+        warnings.simplefilter("always")
+        result = compile(source, path, "exec", dont_inherit=True)
+    return result, not diagnostics
+
+
 def warning_free(path: str, source: str) -> bool:
-    # A compiler warning can reach a configured warnings listener at import even
-    # when the altered callback has never been called.
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        try:
-            compile(source.encode("utf-8"), path, "exec", dont_inherit=True)
-        except (Warning, SyntaxError):
-            return False
-    return True
+    try:
+        return compile_source(path, source.encode("utf-8"))[1]
+    except (Warning, SyntaxError):
+        return False
 
 
 def callback_change(before: CodeType, after: CodeType):

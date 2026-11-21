@@ -3,7 +3,6 @@
 import ast
 import hashlib
 import json
-from pathlib import Path
 
 
 def roster_digest(rows):
@@ -49,60 +48,3 @@ def class_fields(tree):
 
     walk(tree.body, "")
     return result
-
-
-def projection(stmt):
-    if not (
-        isinstance(stmt, ast.Assign)
-        and len(stmt.targets) == 1
-        and isinstance(stmt.targets[0], ast.Attribute)
-        and isinstance(stmt.targets[0].value, ast.Name)
-        and isinstance(stmt.value, ast.SetComp)
-    ):
-        return None
-    dst = stmt.targets[0]
-    comp = stmt.value
-    if len(comp.generators) != 1:
-        return None
-    g = comp.generators[0]
-    if not (
-        isinstance(g.target, ast.Tuple)
-        and len(g.target.elts) == 2
-        and all(isinstance(t, ast.Name) for t in g.target.elts)
-        and isinstance(comp.elt, ast.Name)
-        and comp.elt.id == g.target.elts[0].id
-        and len(g.ifs) == 1
-        and isinstance(g.ifs[0], ast.Name)
-        and g.ifs[0].id == g.target.elts[1].id
-        and not g.is_async
-        and isinstance(g.iter, ast.Call)
-        and not g.iter.args
-        and not g.iter.keywords
-        and isinstance(g.iter.func, ast.Attribute)
-        and g.iter.func.attr == "items"
-        and isinstance(g.iter.func.value, ast.Attribute)
-        and isinstance(g.iter.func.value.value, ast.Name)
-        and g.iter.func.value.value.id == dst.value.id
-    ):
-        return None
-    return dst, g
-
-
-def inventory(root):
-    found = {}
-    for source in sorted((root / "sqlglot").rglob("*.py")):
-        module = (
-            source.relative_to(root)
-            .with_suffix("")
-            .as_posix()
-            .replace("/", ".")
-            .removesuffix(".__init__")
-        )
-        tree = ast.parse(source.read_bytes())
-        for stmt in ast.walk(tree):
-            projected = projection(stmt)
-            if projected:
-                found["$derived:" + projected[0].attr] = source.relative_to(root).as_posix()
-        for qname, field in class_fields(tree):
-            found[f"{module}:{qname}:{field}"] = source.relative_to(root).as_posix()
-    return found

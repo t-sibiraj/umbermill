@@ -3,9 +3,8 @@
 import ast
 import base64
 import gzip
-import hashlib
 import json
-from pathlib import Path
+from . import BASE_COMMIT
 from .deferred import warning_free
 from .fields import class_fields, literal_expression, roster_digest
 from .patches import apply_change, parse_patch, UnsupportedPatch
@@ -40,6 +39,14 @@ def outside_expression(source, node):
 def bindings(tree, symbol):
     sites = []
     for node in ast.walk(tree):
+        if isinstance(node, ast.alias) and node.name == "*":
+            return []
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"exec", "eval", "globals", "locals"}
+        ):
+            return []
         if (
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
             and node.name == symbol
@@ -113,7 +120,12 @@ def pure_factory(source, tree, left, right):
     ):
         return False
     inner = body[0]
-    if inner.decorator_list or inner.args.defaults or any(inner.args.kw_defaults) or inner.type_params:
+    if (
+        inner.decorator_list
+        or inner.args.defaults
+        or any(inner.args.kw_defaults)
+        or getattr(inner, "type_params", [])
+    ):
         return False
     postponed = any(
         isinstance(n, ast.ImportFrom)
@@ -197,18 +209,69 @@ class FieldSelector:
         self.base = base
         self.index = json.loads(gzip.decompress(path.read_bytes()))
         if (
-            self.index["base_commit"] != "eb11aec4be8cb2122afe713a4816662c3f0fb2fa"
+            self.index["base_commit"] != BASE_COMMIT
             or roster_digest(json.loads(roster_file.read_bytes())["tests"])
             != self.index["roster_sha256"]
         ):
             raise ValueError("field roster mismatched")
         self.guards = sum(1 << k for k in self.index["guards"])
+        self.eligible_fields = frozenset(self.index.get("eligible_fields", self.index["fields"]))
+        owners = self.eligible_fields | self.index["dicts"].keys()
+        self.modules = frozenset(self.index["root_loaded"]).intersection(
+            name.partition(":")[0] for name in owners
+        )
+
+    def isolated_consumers(self, name, key):
+        module,owner,_=name.split(":",2)
+        rows=self.index.get("isolated_readers", [])
+        if not rows:
+            return None
+        known=set()
+        affected=set()
+        for row in rows:
+            n=row["test"]
+            known.add(n)
+            if module not in row["loaded"]:
+                continue
+            if module+":"+owner in row["reflection"]:
+                affected.add(n)
+                continue
+            if key is None:
+                if name in row["fields"]:
+                    affected.add(n)
+                continue
+            if name not in row["seen"]:
+                affected.add(n)
+                continue
+            keys=row["keys"].get(name,())
+            if "*" in keys or "="+key in keys:
+                affected.add(n)
+                continue
+            for other in set(self.index.get("derived",{}).get(name,())) | set(row["derived"].get(name,())):
+                if other in row["fields"] or other.rsplit(":",1)[0] in row["reflection"]:
+                    affected.add(n)
+                    break
+        covered=sum(1<<n for n in known)
+        return covered,sum(1<<n for n in affected)
 
     def narrow(self, patch):
         changes = parse_patch(patch)
-        if len(changes) != 1:
+        if not changes or len({change.old_path for change in changes}) != len(changes):
             return None
-        c = changes[0]
+        if len(changes) == 1:
+            return self._change(changes[0])
+        mask = 0
+        owners = []
+        for change in changes:
+            effect = self._change(change)
+            if effect is None:
+                return None
+            field_mask, name, key = effect
+            mask |= field_mask
+            owners.append(name if key is None else f"{name}[{key!r}]")
+        return mask, ", ".join(owners), None
+
+    def _change(self, c):
         p = c.old_path
         if (
             c.new_path != p
@@ -218,16 +281,16 @@ class FieldSelector:
             or not p.endswith(".py")
         ):
             return None
+        if p[:-3].replace("/", ".").removesuffix(".__init__") not in self.modules:
+            return None
         before = self.base._source(p)
         after = apply_change(before, c)
         diff = delta(p, before, after, self.base._source)
         if diff is None:
             return None
         name, key = diff
-        if name.split(":", 1)[0] not in self.index["root_loaded"]:
-            return None
         if key is None:
-            if name not in self.index.get("eligible_fields", self.index["fields"]):
+            if name not in self.eligible_fields:
                 return None
             entries = [
                 self.index["fields"][name],
@@ -238,6 +301,7 @@ class FieldSelector:
                 return None
             mapping = self.index["dicts"][name]
             entries = [mapping.get("*", ""), mapping.get("=" + key, "")]
+            entries.append(self.index.get("dict_reflection", {}).get(name.rsplit(":", 1)[0], ""))
             for other in self.index.get("derived", {}).get(name, []):
                 entries.extend(
                     (
@@ -253,7 +317,17 @@ class FieldSelector:
             if deferred is None:
                 return None
             readers = self.base._reads.get(p, 0) | deferred[1]
-        mask = self.guards | self.base._unmapped | readers
+        extra = self.guards
+        individual = self.isolated_consumers(name,key)
+        if individual and self.base._reader_index and self.base._isolated_index:
+            observed=self.base._reader_index.changed(p,before,after,guard=False)
+            cold=self.base._isolated_index.changed(p,before,after)
+            if observed is not None and cold is not None:
+                proven, consumers=individual
+                retained=(self.base._reader_index.guard | self.guards) & ~proven
+                readers=observed | cold | retained | consumers
+                extra=0
+        mask = extra | self.base._unmapped | readers
         for e in entries:
             mask |= int.from_bytes(base64.b64decode(e, validate=True), "little")
         return mask, name, key

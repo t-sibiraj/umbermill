@@ -4,7 +4,9 @@ import gzip
 import json
 import marshal
 import types
+from .deferred import compile_source
 from functools import lru_cache
+from bisect import bisect_left
 
 CODE_FIELDS = (
     "co_argcount", "co_posonlyargcount", "co_kwonlyargcount", "co_nlocals",
@@ -43,7 +45,7 @@ def get_codes(code):
 
 @lru_cache(128)
 def baseline(path,source):
-    return get_codes(compile(source.encode(),path,"exec",dont_inherit=True))
+    return get_codes(compile_source(path,source.encode())[0])
 
 
 def number(value,size):
@@ -63,16 +65,19 @@ class ReaderIndex:
         self.size=size
         self.paths=data["paths"]
         self.guard=number(data["guard"],size)
+        self.operators=data.get("operators",{})
+        self.lines=data.get("lines",{})
+        self.untraced=data.get("untraced",{})
 
-    def changed(self,path,before,after):
+    def changed(self,path,before,after,*,guard=True):
         row=self.paths.get(path)
         if row is None or row["raw"] is None:
             return None
-        result=number(row["raw"],self.size) | self.guard
+        result=number(row["raw"],self.size) | (self.guard if guard else 0)
         if not row["code"]:
             return result
         old=baseline(path,before)
-        new=get_codes(compile(after.encode(),path,"exec",dont_inherit=True))
+        new=baseline(path,after)
         for name,line,kind,encoded in row["code"]:
             left=old.get((name,line),[])
             right=new.get((name,line),[])
@@ -87,4 +92,19 @@ class ReaderIndex:
             if readers is None:
                 return None
             result |= readers
+        return result
+
+    def comparison_guards(self,path,site,op):
+        encoded=self.operators.get(site)
+        return (number(self.untraced.get(path,""),self.size) |
+                (number(encoded[op],self.size) if encoded is not None else 0))
+
+    def executed_ranges(self,path,ranges):
+        result=0
+        for n,executed in self.lines.get(path,{}).items():
+            for begin,end in ranges:
+                i=bisect_left(executed,begin)
+                if i<len(executed) and executed[i]<=end:
+                    result|=1<<int(n)
+                    break
         return result

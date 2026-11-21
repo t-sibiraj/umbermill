@@ -3,10 +3,13 @@ import ast
 import dis
 import io
 import tokenize
-import marshal
+import struct
+from collections import Counter
 import sys
 import warnings
 from types import CodeType
+from functools import lru_cache
+from .deferred import compile_source
 
 from .patches import UnsupportedPatch, apply_change, parse_patch
 
@@ -22,6 +25,26 @@ def firstline_constant(code, index):
                              and ops[i+1].argval == "__firstlineno__" for i in hits)
 
 
+def constant_key(value):
+    # CPython marshal encodes interning and reference-table state. Only language
+    # values and IEEE fields belong in this comparison of emitted constants.
+    kind=type(value)
+    if kind in (str,bytes,bool,int) or value is None or value is Ellipsis or value is NotImplemented:
+        return kind,value
+    if kind is float:
+        return kind,struct.pack("!d",value)
+    if kind is complex:
+        return kind,struct.pack("!dd",value.real,value.imag)
+    if kind is tuple:
+        return kind,tuple(constant_key(v) for v in value)
+    if kind is frozenset:
+        # Multiple distinct NaNs with the same bit pattern may coexist in a set.
+        return kind,frozenset(Counter(constant_key(v) for v in value).items())
+    if kind is slice:
+        return kind,tuple(constant_key(v) for v in (value.start,value.stop,value.step))
+    raise ValueError("unexpected compiled constant type")
+
+
 def equivalent_code(old, new, allow_class_line=False):
     fields = ("co_argcount", "co_posonlyargcount", "co_kwonlyargcount", "co_nlocals",
               "co_stacksize", "co_flags", "co_code", "co_names", "co_varnames", "co_filename",
@@ -34,13 +57,14 @@ def equivalent_code(old, new, allow_class_line=False):
         if isinstance(before, CodeType):
             if not equivalent_code(before, after, allow_class_line):
                 return False
-        elif marshal.dumps(before) != marshal.dumps(after):
+        elif constant_key(before) != constant_key(after):
             if not (allow_class_line and type(before) is int and
                     firstline_constant(old, idx) and firstline_constant(new, idx)):
                 return False
     return True
 
 
+@lru_cache(24)
 def abstract_program(text, path):
     tree=ast.parse(text,path,type_comments=True)
     directives=[]
@@ -56,13 +80,17 @@ def abstract_program(text, path):
     return ast.dump(tree), directives
 
 
+@lru_cache(32)
 def position_only(path, before, after, allow_class_line=False):
     if sys.implementation.name != "cpython" or sys.version_info[:2] != (3, 13):
         return False
     if not path.startswith("sqlglot/") or not path.endswith(".py") or before == after:
         return False
     def code(text):
-        return compile(text.encode("utf8"), path, "exec", dont_inherit=True)
+        compiled, clean = compile_source(path,text.encode("utf8"))
+        if not clean:
+            raise SyntaxWarning("source generated a compiler diagnostic")
+        return compiled
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         try:
@@ -126,7 +154,9 @@ def qualify_parts(selector, parts, *, mode="observed_class", overrides=None):
             continue
         if not position_only(path,selector._source(path),apply_change(selector._source(path),c),allow_class_line=mode.endswith("class")):
             return None
-        data=(overrides or {}).get(path)
+        if overrides is not None and path not in overrides:
+            return None
+        data=None if overrides is None else overrides[path]
         permitted=path in selector._deferred
         if not permitted and data is None:
             return None
@@ -138,3 +168,11 @@ def qualify_parts(selector, parts, *, mode="observed_class", overrides=None):
         selected |= raw
         qualified.append(path)
     return selected, qualified
+
+
+def candidate_trivia(change):
+    """Cheap admission only. Compiler and syntax checks decide equivalence."""
+    def edited(prefix):
+        return "".join(row[1:].partition("#")[0].strip()
+                       for hunk in change.hunks for row in hunk.lines if row.startswith(prefix))
+    return edited("-")==edited("+")

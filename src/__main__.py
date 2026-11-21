@@ -2,12 +2,13 @@
 
 import argparse
 import json
+import gzip
 import os
 from pathlib import Path
 import sys
 
 from .impact import ImpactSelector
-from .patches import UnsupportedPatch, parse_patch
+from .patches import UnsupportedPatch, parse_patch, apply_change
 from .slack import SlackPacker
 from .precision import FieldSelector
 from .selector import Selection
@@ -46,6 +47,14 @@ def main() -> int:
                 field_selector = FieldSelector(selector, args.maps.with_name("fields.json.gz"), args.data_dir / "tests.json")
             except (OSError, ValueError, TypeError, KeyError):
                 pass
+        guard_index = None
+        guard_map = args.maps.with_name("conditions.json.gz")
+        if isinstance(selector,ImpactSelector) and not selector.unavailable and selector._reader_index and guard_map.is_file():
+            from .guards import GuardMasks, match_hunk
+            from . import BASE_COMMIT
+            guard_data=json.loads(gzip.decompress(guard_map.read_bytes()))
+            if guard_data.get("base_commit")==BASE_COMMIT:
+                guard_index=GuardMasks(guard_data,selector._reader_index.guard)
         commits = args.data_dir / "commits"
         if not commits.is_dir():
             raise ValueError("commits directory is missing")
@@ -64,6 +73,27 @@ def main() -> int:
                         selection = Selection([n for n in selection.tests if (mask >> n) & 1],
                                               "observed class field consumers", False)
                 except (OSError, ValueError, TypeError, KeyError, SyntaxError, RecursionError, UnsupportedPatch):
+                    pass
+            if guard_index and (not selection.fallback or selection.reason ==
+                                "uncertain impact: changed function can run during module loading or test collection"):
+                try:
+                    changes=parse_patch(patch)
+                    if len(changes)==1:
+                        c=changes[0]
+                        eligible=guard_index.by_path.get(c.old_path, set())
+                        if c.old_path==c.new_path and not c.added and not c.deleted and len(c.old_lines)==1 and c.old_lines & eligible:
+                            item=match_hunk(c)
+                            if item is not None:
+                                old=selector._source(c.old_path)
+                                new=apply_change(old,c)
+                                readers=selector._reader_index.changed(c.old_path,old,new)
+                                if readers is not None:
+                                    current=sum(1<<i for i in selection.tests)
+                                    mask=guard_index.select(c,item,readers,selector._collection_sites.get(c.old_path,{}),current)
+                                    if mask is not None:
+                                        mask|=selector._unmapped | (current & selector._sites.get(c.old_path,{}).get(next(iter(c.old_lines)),0))
+                                        selection=Selection([n for n in selection.tests if (mask>>n)&1],"observed condition and worker dependencies",False)
+                except (OSError,ValueError,KeyError,TypeError,UnsupportedPatch,SyntaxError,RecursionError):
                     pass
             key = tuple(selection.tests)
             if key not in schedules:

@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from types import CodeType
 
 from . import BASE_COMMIT
+from .deferred import compile_source
 from .patches import Change, UnsupportedPatch, apply_change, parse_patch
 from .selector import Selection
 
@@ -81,7 +82,7 @@ class ModuleShape:
     def bytecode(self) -> CodeType:
         # Every path that narrows the roster still validates the compiled
         # program. Full-roster fallbacks have nothing to learn from this step.
-        return compile(self.raw, self.path, "exec", dont_inherit=True)
+        return compile_source(self.path, self.raw)[0]
 
     @cached_property
     def closure_layout(self) -> tuple:
@@ -464,6 +465,7 @@ class ImpactSelector:
             raise ValueError("invalid source digest")
         # Absence from a completed, pinned initialization run is relevant only
         # to compiled deferred code. Missing evidence keeps the existing fallback.
+        self._relation_tokens = payload.get("relation_tokens", {})
         self._relation_sites = payload.get("relation_sites", {})
         if not isinstance(self._relation_sites, dict):
             raise ValueError("invalid comparison sites")
@@ -471,7 +473,12 @@ class ImpactSelector:
         if path.with_name("readers.json.gz").is_file():
             from .readers import ReaderIndex
             self._reader_index = ReaderIndex(path.with_name("readers.json.gz"), BASE_COMMIT, len(roster))
-        self._position_readers = self._read_path_map(payload,"position_readers",numbers) if "position_readers" in payload else {}
+        self._isolated_index = None
+        if path.with_name("isolated.json.gz").is_file():
+            from .readers import ReaderIndex
+            self._isolated_index = ReaderIndex(path.with_name("isolated.json.gz"), BASE_COMMIT, len(roster))
+        self._position_readers = self._read_path_map(payload,"position_readers",numbers) if "position_readers" in payload else None
+        self._test_sources = payload.get("test_source_observations",{})
         self._deferred = {}
         if "deferred_baseline" in payload:
             def deferred_record(record):
@@ -516,6 +523,12 @@ class ImpactSelector:
             paths = {change.old_path for change in changes}
             if len(paths) != len(changes):
                 raise UnsupportedPatch("duplicate old path in a patch")
+            if len(changes)==1 and changes[0].old_path in self._test_sources:
+                from .test_scope import pick
+                proof=pick(self,patch,self._test_sources)
+                if proof is not None:
+                    accepted,reason=proof
+                    return Selection([n for n in self.all_tests if (accepted>>n)&1],reason,False)
             for change in changes:
                 tests, reason = self._change_tests(change, allow_fixture_projection="tests/helpers.py" not in paths,
                                                    single_file=len(changes) == 1)
@@ -546,16 +559,23 @@ class ImpactSelector:
         if source == replacement:
             return 0, "identical source"
         readers = self._reads.get(path, 0)
+        independent_readers = None
         projected_readers = None
         if single_file and self._reader_index and self.granularity == "function" and path.startswith("sqlglot/"):
-            projected_readers = self._reader_index.changed(path, source, replacement)
+            observed = self._reader_index.changed(path, source, replacement, guard=False)
+            if observed is not None:
+                projected_readers = observed | self._reader_index.guard
+                if self._isolated_index:
+                    separate = self._isolated_index.changed(path, source, replacement)
+                    if separate is not None:
+                        independent_readers = observed | separate
         if projected_readers is not None:
             readers = projected_readers
         if single_file and (path in self._deferred or projected_readers is not None) and len(change.old_lines) == 1 and self._relation_sites:
             line = next(iter(change.old_lines))
             if str(line) in self._relation_sites.get(path, {}):
                 from .relation import one_relation
-                proof = one_relation(path, source, replacement)
+                proof = one_relation(path, source, replacement, str(line), self._relation_tokens.get(path, {}).get(str(line), {}))
                 if proof is not None:
                     site, operator = proof
                     _, row, column = site.split("|")
@@ -563,6 +583,8 @@ class ImpactSelector:
                     if isinstance(alts, list) and len(alts) == 8 and isinstance(alts[operator], str):
                         affected = int.from_bytes(base64.b64decode(alts[operator], validate=True), "little")
                         if affected.bit_length() <= len(self.all_tests):
+                            if independent_readers is not None:
+                                readers = independent_readers | self._isolated_index.comparison_guards(path,site,operator)
                             return affected | readers | (0 if projected_readers is not None else self._deferred[path][1]), "baseline operand comparison outcomes and observers"
         if not path.endswith(".py"):
             if not readers:
@@ -596,6 +618,15 @@ class ImpactSelector:
             | self._tests_by_file.get(path, 0)
             | readers
         )
+        if path.startswith("sqlglot/") and self.granularity=="function" and self._position_readers is not None and path in self._position_readers:
+            from .position import candidate_trivia, position_only
+            if candidate_trivia(change) and position_only(path, source, replacement, allow_class_line=True):
+                old_code, _ = compile_source(path,source.encode())
+                new_code, _ = compile_source(path,replacement.encode())
+                from .readers import same_code
+                if same_code(old_code,new_code):
+                    return readers, "unchanged executable source plus text readers"
+                return file_tests, "source positions may affect file dependents"
         if path not in self._shapes:
             self._shapes[path] = _describe_module(path, source)
         old = self._shapes[path]
@@ -632,6 +663,9 @@ class ImpactSelector:
                         for line in lines:
                             callers |= sites.get(line, 0)
                         if callers and warning_free(path, source) and warning_free(path, replacement):
+                            if independent_readers is not None:
+                                readers = independent_readers | self._isolated_index.executed_ranges(path,[(n,n) for n in lines])
+                                text_readers = 0
                             return callers | readers | text_readers, "observed deferred callback and source readers"
             raise UnsupportedPatch(uncertain_load)
         if not file_tests:
@@ -647,6 +681,9 @@ class ImpactSelector:
         if old.closure_layout != new.closure_layout:
             return file_tests, "changed closure or class creation"
         sites = self._sites.get(path, {})
+        if independent_readers is not None and changed:
+            ranges=[(body.first_line,body.last_line) for body,_ in changed]
+            readers = independent_readers | self._isolated_index.executed_ranges(path,ranges)
         selected = readers
         used_statement_sites = False
         for before, after in changed:

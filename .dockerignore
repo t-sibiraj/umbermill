@@ -7,3 +7,5 @@
 !maps/impact.json.gz
 !maps/fields.json.gz
 !maps/readers.json.gz
+!maps/conditions.json.gz
+!maps/isolated.json.gz
