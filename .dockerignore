@@ -1,0 +1,7 @@
+**
+!src/
+!src/*.py
+!tools/
+!tools/*.py
+!maps/
+!maps/impact.json.gz
