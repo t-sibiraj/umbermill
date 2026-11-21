@@ -464,6 +464,14 @@ class ImpactSelector:
             raise ValueError("invalid source digest")
         # Absence from a completed, pinned initialization run is relevant only
         # to compiled deferred code. Missing evidence keeps the existing fallback.
+        self._relation_sites = payload.get("relation_sites", {})
+        if not isinstance(self._relation_sites, dict):
+            raise ValueError("invalid comparison sites")
+        self._reader_index = None
+        if path.with_name("readers.json.gz").is_file():
+            from .readers import ReaderIndex
+            self._reader_index = ReaderIndex(path.with_name("readers.json.gz"), BASE_COMMIT, len(roster))
+        self._position_readers = self._read_path_map(payload,"position_readers",numbers) if "position_readers" in payload else {}
         self._deferred = {}
         if "deferred_baseline" in payload:
             def deferred_record(record):
@@ -502,6 +510,7 @@ class ImpactSelector:
             return self._all(self.unavailable)
         selected = self._unmapped
         reasons: list[str] = []
+        parts = []
         try:
             changes = parse_patch(patch)
             paths = {change.old_path for change in changes}
@@ -512,6 +521,13 @@ class ImpactSelector:
                                                    single_file=len(changes) == 1)
                 selected |= tests
                 reasons.append(reason)
+                parts.append((change, tests, reason))
+            if "source positions may affect file dependents" in reasons:
+                from .position import qualify_parts
+                alternative = qualify_parts(self, parts, mode='observed_composite_class', overrides=self._position_readers)
+                if alternative is not None:
+                    selected, qualified = alternative
+                    reasons = ["position-only source with observed readers"] if qualified else reasons
         except (OSError, UnsupportedPatch, SyntaxError, UnicodeError, ValueError, RecursionError) as exc:
             return self._all(f"uncertain impact: {exc}")
         tests = [number for number in self.all_tests if selected & (1 << number)]
@@ -530,6 +546,24 @@ class ImpactSelector:
         if source == replacement:
             return 0, "identical source"
         readers = self._reads.get(path, 0)
+        projected_readers = None
+        if single_file and self._reader_index and self.granularity == "function" and path.startswith("sqlglot/"):
+            projected_readers = self._reader_index.changed(path, source, replacement)
+        if projected_readers is not None:
+            readers = projected_readers
+        if single_file and (path in self._deferred or projected_readers is not None) and len(change.old_lines) == 1 and self._relation_sites:
+            line = next(iter(change.old_lines))
+            if str(line) in self._relation_sites.get(path, {}):
+                from .relation import one_relation
+                proof = one_relation(path, source, replacement)
+                if proof is not None:
+                    site, operator = proof
+                    _, row, column = site.split("|")
+                    alts = self._relation_sites[path].get(row, {}).get(column)
+                    if isinstance(alts, list) and len(alts) == 8 and isinstance(alts[operator], str):
+                        affected = int.from_bytes(base64.b64decode(alts[operator], validate=True), "little")
+                        if affected.bit_length() <= len(self.all_tests):
+                            return affected | readers | (0 if projected_readers is not None else self._deferred[path][1]), "baseline operand comparison outcomes and observers"
         if not path.endswith(".py"):
             if not readers:
                 raise UnsupportedPatch("data file has no recorded consumers")

@@ -5,3 +5,5 @@
 !tools/*.py
 !maps/
 !maps/impact.json.gz
+!maps/fields.json.gz
+!maps/readers.json.gz
