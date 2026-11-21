@@ -488,6 +488,11 @@ class ImpactSelector:
     ) -> None:
         if granularity not in ("file", "function", "statement"):
             raise ValueError("unknown impact granularity")
+        self._cold_module_input = maps_path, nodeids
+        self._maps_path = maps_path
+        self._snapshot_nodes = nodeids
+        self._snapshot_roster_digest = hashlib.sha256(json.dumps(sorted(nodeids, key=nodeids.__getitem__),
+                                                     separators=(",", ":")).encode()).hexdigest()
         self.all_tests = sorted(nodeids.values())
         self.source_root = source_root.resolve() if source_root is not None else None
         self.granularity = granularity
@@ -654,6 +659,18 @@ class ImpactSelector:
     def select(self, patch: str) -> Selection:
         if self.unavailable:
             return self._all(self.unavailable)
+        if self.granularity == "function" and (
+            patch.count("\ndiff --git ") or "\nnew file mode " in patch
+            or "\ndeleted file mode " in patch or "\nrename from " in patch
+        ):
+            from .file_selection import file_selection
+            try:
+                mask = file_selection(self, patch)
+            except (OSError, ValueError, SyntaxError, UnicodeError, RecursionError):
+                mask = None
+            if mask is not None:
+                return Selection([n for n in self.all_tests if mask >> n & 1],
+                                 "independent file operations and observed consumers", False)
         selected = self._unmapped
         reasons: list[str] = []
         parts = []
@@ -690,6 +707,7 @@ class ImpactSelector:
                     selected, qualified = alternative
                     reasons = ["position-only source with observed readers"] if qualified else reasons
         except (OSError, UnsupportedPatch, SyntaxError, UnicodeError, ValueError, RecursionError) as exc:
+            prior_import = None
             if len(changes) == 1 and self.granularity == "function" and self._reader_index:
                 change = changes[0]
                 path = change.old_path
@@ -704,11 +722,22 @@ class ImpactSelector:
                             mask = (self._cold_file_dependencies[path] | self._files.get(path, 0)
                                     | self._reads.get(path, 0) | self._collection.get(path, 0)
                                     | self._reader_index.guard | self._unmapped)
-                            return Selection([n for n in self.all_tests if mask >> n & 1],
-                                             "cold and warm module dependencies", False)
+                            prior_import = Selection([n for n in self.all_tests if mask >> n & 1],
+                                                     "cold and warm module dependencies", False)
+                            if mask.bit_count() < len(self.all_tests) - 3:
+                                return prior_import
                     except (OSError, UnsupportedPatch, SyntaxError, ValueError, RecursionError):
                         pass
-            return self._all(f"uncertain impact: {exc}")
+            if len(changes) == 1 and self.granularity == "function":
+                try:
+                    from .import_snapshot import select
+                    compared = select(self, changes[0])
+                    if compared is not None:
+                        bits, why = compared
+                        return Selection([n for n in self.all_tests if bits >> n & 1], why, False)
+                except (OSError, ValueError, TypeError, KeyError, RecursionError, UnsupportedPatch):
+                    pass
+            return prior_import or self._all(f"uncertain impact: {exc}")
         tests = [number for number in self.all_tests if selected & (1 << number)]
         return Selection(tests, ", ".join(dict.fromkeys(reasons)), False)
 

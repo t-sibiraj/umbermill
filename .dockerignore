@@ -6,9 +6,14 @@
 !maps/
 !maps/impact.json.gz
 !maps/fields.json.gz
+!maps/flow.json.gz
+!maps/module-cold.json.gz
+!maps/path-observations.json.gz
+!maps/passive-kernel.json.gz
 !maps/readers.json.gz
 !maps/conditions.json.gz
 !maps/isolated.json.gz
 !maps/primitives.json.gz
 !maps/rule-inputs.tar.gz
 !requirements.lock
+!maps/executor-phases.json.gz

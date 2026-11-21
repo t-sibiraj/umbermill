@@ -9,7 +9,7 @@ import tempfile
 import time
 from functools import lru_cache
 from .probe_worker import bounded_worker, cpu
-from .patches import parse_patch, apply_change
+from .patches import UnsupportedPatch, parse_patch, apply_change
 
 
 def numeric_field_line(change):
@@ -128,7 +128,12 @@ class RuntimeChecks:
         if time.monotonic() >= self.deadline or self.worker_cpu >= self.budget:
             return set()
         self.group_start = cpu()
-        changes = parse_patch(patch)
+        try:
+            changes = parse_patch(patch)
+        except UnsupportedPatch:
+            # An independently qualified file move or creation can still have
+            # a small schedule. This verifier only replays ordinary edits.
+            return set()
         if len(changes) != 1:
             return set()
         ch = changes[0]
@@ -177,7 +182,10 @@ class RuntimeChecks:
             return set()
         old = source.read_bytes()
         new = apply_change(old.decode(), ch).encode()
-        compile(new, filename, "exec")
+        try:
+            compile(new, filename, "exec")
+        except SyntaxError:
+            return set()
         if might_replay and filename.startswith("sqlglot/optimizer/"):
             from .rule_checks import RuleChecks
 

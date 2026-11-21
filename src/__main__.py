@@ -72,6 +72,13 @@ def main() -> int:
                 primitive = PrimitiveObservations(args.maps.with_name('primitives.json.gz'), nodeids)
             except (OSError, ValueError, KeyError, TypeError):
                 pass
+        executor_phases = None
+        if checks is not None and args.maps.with_name('executor-phases.json.gz').is_file():
+            from .executor_phases import ExecutorPhases
+            try:
+                executor_phases = ExecutorPhases(args.maps.with_name('executor-phases.json.gz'), nodeids)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
         for path in sorted(commits.glob("*.patch")):
             try:
                 patch = path.read_text(encoding="utf-8")
@@ -118,14 +125,22 @@ def main() -> int:
                 except (OSError,ValueError,KeyError,TypeError,UnsupportedPatch,SyntaxError,RecursionError):
                     pass
             passed=set()
+            process_guard = False
             if checks is not None:
+                from .process_state import uncertain_process_state
+                process_guard = uncertain_process_state(patch, selector)
+            if process_guard:
+                selection = Selection(sorted(durations), "changed process environment can affect later tests", True)
+            elif checks is not None:
                 try:
                     passed=checks.passing(patch,selection,selector)
                 except Exception:
                     # The original set remains the fallback for unknown receipts or setup failures.
                     checks.usable=False
-            if primitive is not None and primitive.passing(selector, patch, selection):
+            if not process_guard and primitive is not None and primitive.passing(selector, patch, selection):
                 passed.add(primitive.number)
+            if not process_guard and executor_phases is not None:
+                passed.update(executor_phases.passing(selector, patch, selection))
             key=tuple(n for n in selection.tests if n not in passed)
             if key not in schedules:
                 schedules[key] = schedule_tests(key, durations)
