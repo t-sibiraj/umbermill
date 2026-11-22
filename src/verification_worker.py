@@ -2,15 +2,16 @@
 
 import gc
 import contextlib
+import decimal
 import importlib
 import json
 import linecache
+import logging
 import os
 from pathlib import Path
 import shutil
 import sys
 import signal
-import warnings
 from types import CodeType, FunctionType
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
@@ -28,13 +29,20 @@ def extension(name):
 
 
 def settings():
-    environment = {k: v for k, v in os.environ.items() if k != "PYTEST_CURRENT_TEST"}
-    dialect = sys.modules.get('sqlglot.dialects.dialect')
-    meta = vars(dialect).get('_Dialect') if dialect is not None else None
-    registry = vars(meta).get('_classes') if type(meta) is type else None
-    registrations = (id(registry), tuple((id(k),id(v)) for k,v in registry.items())) if type(registry) is dict else None
-    return (environment, tuple(sys.path), tuple(sys.meta_path), sys.getrecursionlimit(),
-            sys.getswitchinterval(), os.getcwd(), tuple(warnings.filters), registrations)
+    arithmetic = decimal.getcontext()
+    root = logging.getLogger()
+    return {
+        "environment": {k: v for k, v in os.environ.items() if k != "PYTEST_CURRENT_TEST"},
+        "limits": (sys.getrecursionlimit(), sys.getswitchinterval(), gc.get_threshold()),
+        "imports": (os.getcwd(), len(sys.path), tuple(sys.path[:3])),
+        "arithmetic": (
+            arithmetic.prec, arithmetic.rounding, arithmetic.Emin, arithmetic.Emax,
+            arithmetic.capitals, arithmetic.clamp, frozenset(k for k in arithmetic.traps if arithmetic.traps[k]),
+        ),
+        "logging": (root.level, len(root.handlers), root.manager.disable),
+        "streams": (sys.stdout is sys.__stdout__, sys.stderr is sys.__stderr__),
+        "execution": (sys.excepthook, sys.gettrace() is None),
+    }
 
 
 def direct_or_pytest(job, job_path, numbers, event, clock):
@@ -176,7 +184,7 @@ def replay(job_path):
                 stages, results, began, before = self.seen.pop(nodeid)
                 snapshot = settings()
                 if snapshot != before:
-                    event("state", numbers[nodeid])
+                    event("state", numbers[nodeid], [field for field in snapshot if snapshot[field] != before[field]])
                 if "fail" in results:
                     verdict = "failed"
                 elif results or stages != {"setup", "call", "teardown"}:
