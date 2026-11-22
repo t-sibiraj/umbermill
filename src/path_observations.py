@@ -1,5 +1,6 @@
 """Resolve test contexts that observed a regular path name or its parent directory."""
 
+import ast
 import base64
 import gzip
 import hashlib
@@ -68,7 +69,9 @@ def path_readers(selector, old_path, new_path):
                 str(name) != value
                 or name.is_absolute()
                 or any(p.startswith(".") or not p.isascii() for p in name.parts)
-                or name.suffix not in {".py", ".sql", ".md"}
+                or (name.suffix not in {".py", ".sql", ".md"}
+                    and not (name.parts[:2] == ("tests", "fixtures")
+                             and name.suffix in {".csv", ".json", ".txt", ".yaml", ".yml", ".tsv"}))
                 or name.name in {"conftest.py", "__init__.py", "setup.py"}
                 or name.name.startswith("test_")
                 or name.name.endswith("_test.py")
@@ -93,7 +96,7 @@ def path_readers(selector, old_path, new_path):
             # different membership or timestamp after insertion/removal. Both parents
             # are evaluated on a move. Narrowly projected pytest discovery only tests
             # if the occurrence is a test filename, with standard regular-file kind.
-            for kind in ("metadata", "directory", "raw"):
+            for kind in ("metadata", "metadata_mtime", "directory", "raw"):
                 mask |= rows.get(kind, {}).get(parent, 0)
             if name.suffix == ".py":
                 module = ".".join(name.with_suffix("").parts)
@@ -106,6 +109,29 @@ def path_readers(selector, old_path, new_path):
         return None if mask.bit_count() >= len(selector.all_tests) else mask
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
         return None
+
+
+def _name_available(selector, name):
+    # A newly importable child can displace an existing package attribute or a
+    # namespace package even when the original child name had no import hit.
+    if (selector.source_root / name.with_suffix("")).exists():
+        return False
+    source = selector._source(str(name.parent / "__init__.py"))
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in {name.stem, "__getattr__", "__dir__"}:
+                return False
+        elif isinstance(node, ast.Name):
+            if (isinstance(node.ctx, ast.Store) and node.id == name.stem
+                    or node.id in {"globals", "exec", "setattr", "__getattr__", "__dir__"}):
+                return False
+        elif isinstance(node, ast.Constant) and node.value == name.stem:
+            return False
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            if any(a.name == "*" or (a.asname or a.name.split(".")[0]) == name.stem
+                   for a in node.names):
+                return False
+    return True
 
 
 def new_module_unimported(selector, path):
@@ -125,6 +151,8 @@ def new_module_unimported(selector, path):
         for parent in name.parents
         if str(parent) != "."
     ):
+        return False
+    if not _name_available(selector, name):
         return False
     _, rows = selector._path_observations
     module = ".".join(name.with_suffix("").parts)

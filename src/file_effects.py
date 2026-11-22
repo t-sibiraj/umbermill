@@ -17,14 +17,16 @@ class FileEdit:
     before: str
     after: str
     patch: str
+    copied_from: str | None = None
 
 
-# Quoted/escaped paths, nonregular modes, submodules, copies and combined diffs
+# Quoted/escaped paths, nonregular modes, submodules and combined diffs
 # go through the selector's ordinary broad fallback.
 _PATH = r"[A-Za-z0-9_.+@/-]+"
 _HEADER = re.compile(rf"diff --git a/({_PATH}) b/({_PATH})")
 _INDEX = re.compile(r"index ([a-f0-9]{7,40})\.\.([a-f0-9]{7,40})(?: (100644|100755))?")
 _MODE = re.compile(r"(new file|deleted file) mode (100644|100755)")
+_SIMILARITY = re.compile(r"similarity index (100|[1-9]?[0-9])%")
 
 
 def _fail():
@@ -60,6 +62,38 @@ def _match_hash(text, digest, exists):
         _fail()
 
 
+def _relocated(root, block, lines, src, dst):
+    if len(lines) < 4 or src.casefold() == dst.casefold():
+        _fail()
+    similarity = _SIMILARITY.fullmatch(lines[1])
+    copied = lines[2:4] == ["copy from " + src, "copy to " + dst]
+    if not similarity or (not copied and lines[2:4] != ["rename from " + src, "rename to " + dst]):
+        _fail()
+    old = _location(root, src, exists=True)
+    _location(root, dst, exists=False)
+    before = old.read_bytes().decode("utf-8")
+    after = before
+    if similarity[1] == "100":
+        if len(lines) != 4:
+            _fail()
+    else:
+        sha = _INDEX.fullmatch(lines[4]) if len(lines) > 7 else None
+        if sha is None or lines[5:7] != ["--- a/" + src, "+++ b/" + dst]:
+            _fail()
+        if sha[3] and bool(old.stat().st_mode & stat.S_IXUSR) != (sha[3] == "100755"):
+            _fail()
+        hunks = "\n".join(lines[7:]) + "\n"
+        changes = parse_patch(f"--- a/{src}\n+++ b/{src}\n" + hunks)
+        if len(changes) != 1:
+            _fail()
+        after = apply_change(before, changes[0])
+        _match_hash(before, sha[1], True)
+        _match_hash(after, sha[2], True)
+    if copied:
+        return FileEdit(None, dst, "", after, block, copied_from=src)
+    return FileEdit(src, dst, before, after, block)
+
+
 def _one(root, block):
     lines = block.split("\n")
     if lines[-1] == "":
@@ -69,11 +103,7 @@ def _one(root, block):
         _fail()
     src, dst = head.groups()
     if src != dst:
-        if lines[1:] != ["similarity index 100%", "rename from " + src, "rename to " + dst]:
-            _fail()
-        before = _location(root, src, exists=True).read_bytes().decode("utf-8")
-        _location(root, dst, exists=False)
-        return FileEdit(src, dst, before, before, block)
+        return _relocated(root, block, lines, src, dst)
     idx = 1
     mode = _MODE.fullmatch(lines[idx]) if idx < len(lines) else None
     if mode:
@@ -124,7 +154,7 @@ def materialize(root: Path, patch: str) -> list[FileEdit]:
     edits = [_one(root, block) for block in blocks]
     occupied = set()
     for edit in edits:
-        paths = {name.casefold() for name in (edit.old, edit.new) if name is not None}
+        paths = {name.casefold() for name in (edit.old, edit.new, edit.copied_from) if name is not None}
         if occupied & paths:
             _fail()
         occupied.update(paths)

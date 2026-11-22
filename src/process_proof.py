@@ -1,12 +1,11 @@
 """Protect an original fresh-process assertion from unrelated dormant function edits."""
 
 import ast
-import gzip
-import json
 import platform
 import sys
 import warnings
 
+from .map_cache import load_map
 from . import BASE_COMMIT
 from .guards import one_line_change
 from .deferred import warning_free, callback_change, compile_source
@@ -67,7 +66,7 @@ def inert_body_statement(old, new):
 
 class FreshProcess:
     def __init__(self, path, nodeids):
-        data = json.loads(gzip.decompress(path.read_bytes()))
+        data = load_map(path)
         if (
             data["base"] != BASE_COMMIT
             or data["python"] != list(sys.version_info[:2])

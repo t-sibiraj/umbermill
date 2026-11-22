@@ -659,6 +659,21 @@ class ImpactSelector:
     def select(self, patch: str) -> Selection:
         if self.unavailable:
             return self._all(self.unavailable)
+
+        from .process_state import uncertain_process_state
+        from .registry_state import uncertain_registry_state
+
+        if uncertain_registry_state(patch, self):
+            return Selection(self.all_tests.copy(), "changed dialect registry", True, "shared state")
+        if uncertain_process_state(patch, self):
+            return Selection(self.all_tests.copy(), "changed process environment", True, "shared state")
+        if self.granularity == "function":
+            from .dependencies import plan_patch
+
+            planned = plan_patch(self, patch)
+            if planned is not None:
+                return planned
+
         if self.granularity == "function" and (
             patch.count("\ndiff --git ") or "\nnew file mode " in patch
             or "\ndeleted file mode " in patch or "\nrename from " in patch
@@ -737,7 +752,15 @@ class ImpactSelector:
                         return Selection([n for n in self.all_tests if bits >> n & 1], why, False)
                 except (OSError, ValueError, TypeError, KeyError, RecursionError, UnsupportedPatch):
                     pass
-            return prior_import or self._all(f"uncertain impact: {exc}")
+            if prior_import is not None:
+                return prior_import
+            if self.granularity == "function":
+                # Consult the broad cache closure only after localized proofs
+                # have failed to resolve this patch.
+                planned = plan_patch(self, patch, general=True)
+                if planned is not None and len(planned.tests) < len(self.all_tests):
+                    return planned
+            return self._all(f"uncertain impact: {exc}")
         tests = [number for number in self.all_tests if selected & (1 << number)]
         return Selection(tests, ", ".join(dict.fromkeys(reasons)), False)
 

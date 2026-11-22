@@ -152,6 +152,8 @@ def _structural(selector, edit):
     observed = path_readers(selector, edit.old, edit.new)
     if observed is None or active_destination and observed:
         return None
+    if edit.old:
+        observed |= selector._reads.get(edit.old, 0) | selector._collection.get(edit.old, 0)
     if edit.new and _production_module(PurePosixPath(edit.new)):
         try:
             from .path_observations import new_module_unimported

@@ -1,9 +1,8 @@
 """Project observed text and code-object consumers onto a supplied source change."""
 
 import base64
-import gzip
-import json
 import types
+from .map_cache import load_map
 from .deferred import compile_source
 from .position import constant_key
 from functools import lru_cache
@@ -73,7 +72,7 @@ def number(value, size):
 
 class ReaderIndex:
     def __init__(self, path, commit, size):
-        data = json.loads(gzip.decompress(path.read_bytes()))
+        data = load_map(path)
         if data["base_commit"] != commit:
             raise ValueError("reader source identity mismatch")
         self.size = size

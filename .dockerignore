@@ -19,3 +19,7 @@
 !maps/executor-phases.json.gz
 !maps/operand-observations.json.gz
 !maps/fresh-process.json.gz
+!maps/time-inputs.json.gz
+!maps/class-declarations.json.gz
+!maps/effective-dispatch.json.gz
+!maps/paired-operands.json.gz

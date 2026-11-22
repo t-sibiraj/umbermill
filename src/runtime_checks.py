@@ -92,12 +92,15 @@ class RuntimeChecks:
         os.environ["PYTHONPATH"] = str(self.tree)
         active = True
         where = str(self.tree) + "/"
+        original = str(self.root) + "/"
 
         def audit(event, args):
             if active and event == "open" and isinstance(args[0], (str, bytes)):
                 resolved = os.path.realpath(os.fsdecode(args[0]))
                 if resolved.startswith(where):
                     self.opened.add(resolved[len(where) :])
+                elif resolved.startswith(original):
+                    self.opened.add(resolved[len(original) :])
 
         sys.addaudithook(audit)
         importlib.import_module("sqlglot")

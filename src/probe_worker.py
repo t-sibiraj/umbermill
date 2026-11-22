@@ -38,7 +38,7 @@ class Outcomes(unittest.TestResult):
         self.bad.add(test.id())
 
 
-def run_requested(tree, members):
+def run_requested(tree, members, changed_paths=()):
     tree = tree.resolve()
     os.chdir(tree)
     sys.path.insert(0, str(tree))
@@ -50,6 +50,13 @@ def run_requested(tree, members):
 
     if Path(find_spec("sqlglot").origin).resolve() != tree / "sqlglot/__init__.py":
         return {"reason": "wrong source origin"}
+    if changed_paths:
+        if __package__:
+            from .executor_cache import install_executor_cache
+        else:
+            from executor_cache import install_executor_cache
+        if not install_executor_cache(tree, changed_paths, tuple(node for _, node in members)):
+            return {"reason": "fixture cache unavailable"}
     tests, known = [], {}
     for number, nodeid in members:
         pieces = nodeid.split("::")
@@ -80,20 +87,27 @@ def run_requested(tree, members):
     return {
         "reason": "complete",
         "passed": sorted(known[name] for name in good if name in known),
+        "unresolved": sorted(known[name] for name in result.bad if name in known),
         "ran": result.testsRun,
         "failed_or_unknown": len(tests) - len(good),
     }
 
 
-def child_body(tree, members, receipt):
+def child_body(tree, members, receipt, changed_paths=()):
     try:
-        result = run_requested(tree, members)
+        result = run_requested(tree, members, changed_paths)
     except BaseException as exc:
         result = {"reason": "worker " + type(exc).__name__}
     receipt.write_text(json.dumps(result))
 
 
-def bounded_worker(tree, members, scratch, wall, use_fork, baseline_threads=1, max_cpu=None):
+def bounded_worker(tree, members, scratch, wall, use_fork, baseline_threads=1, max_cpu=None, changed_paths=()):
+    if __package__:
+        from .replay_limits import ReplayMemory
+    else:
+        from replay_limits import ReplayMemory
+
+    memory = ReplayMemory()
     end_cpu = cpu() + max_cpu if max_cpu is not None else None
     receipt = scratch / "receipt.json"
     receipt.unlink(missing_ok=True)
@@ -109,10 +123,10 @@ def bounded_worker(tree, members, scratch, wall, use_fork, baseline_threads=1, m
             with open(os.devnull, "w") as nil:
                 os.dup2(nil.fileno(), 1)
                 os.dup2(nil.fileno(), 2)
-            child_body(tree, members, receipt)
+            child_body(tree, members, receipt, changed_paths)
             os._exit(0)
         end = time.monotonic() + wall
-        while time.monotonic() < end and (end_cpu is None or cpu() < end_cpu):
+        while time.monotonic() < end and (end_cpu is None or cpu() < end_cpu) and not memory.over(pid):
             child, status = os.waitpid(pid, os.WNOHANG)
             if child:
                 break
@@ -126,7 +140,8 @@ def bounded_worker(tree, members, scratch, wall, use_fork, baseline_threads=1, m
                     os.kill(pid, signal.SIGKILL)
             os.waitpid(pid, 0)
             return {
-                "reason": "cpu budget" if end_cpu is not None and cpu() >= end_cpu else "timeout"
+                "reason": ("memory budget" if memory.exceeded else
+                           "cpu budget" if end_cpu is not None and cpu() >= end_cpu else "timeout")
             }
         if status:
             return {"reason": "worker exit"}
@@ -142,6 +157,7 @@ def bounded_worker(tree, members, scratch, wall, use_fork, baseline_threads=1, m
                 str(tree),
                 str(job),
                 str(receipt),
+                *changed_paths,
             ],
             start_new_session=True,
             stdout=subprocess.DEVNULL,
@@ -152,6 +168,7 @@ def bounded_worker(tree, members, scratch, wall, use_fork, baseline_threads=1, m
                 proc.poll() is None
                 and time.monotonic() < end
                 and (end_cpu is None or cpu() < end_cpu)
+                and not memory.over(proc.pid)
             ):
                 time.sleep(0.012)
             if proc.poll() is None:
@@ -160,6 +177,7 @@ def bounded_worker(tree, members, scratch, wall, use_fork, baseline_threads=1, m
                 proc.wait()
                 return {
                     "reason": (
+                        "memory budget" if memory.exceeded else
                         "cpu budget" if end_cpu is not None and cpu() >= end_cpu else "timeout"
                     )
                 }
@@ -179,4 +197,4 @@ def cpu():
 
 
 if __name__ == "__main__" and sys.argv[1] == "worker":
-    child_body(Path(sys.argv[2]), json.loads(Path(sys.argv[3]).read_bytes()), Path(sys.argv[4]))
+    child_body(Path(sys.argv[2]), json.loads(Path(sys.argv[3]).read_bytes()), Path(sys.argv[4]), sys.argv[5:])

@@ -2,8 +2,8 @@
 
 import ast
 import base64
-import gzip
 import json
+from .map_cache import load_map
 from . import BASE_COMMIT
 from .deferred import warning_free
 from .fields import class_fields, literal_expression, roster_digest
@@ -198,7 +198,7 @@ def delta(path, old, new, source):
 class FieldSelector:
     def __init__(self, base, path, roster_file):
         self.base = base
-        self.index = json.loads(gzip.decompress(path.read_bytes()))
+        self.index = load_map(path)
         if (
             self.index["base_commit"] != BASE_COMMIT
             or roster_digest(json.loads(roster_file.read_bytes())["tests"]) != self.index["roster_sha256"]

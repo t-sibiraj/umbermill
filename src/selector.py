@@ -19,6 +19,7 @@ class Selection:
     tests: list[int]
     reason: str
     fallback: bool
+    basis: str = "coverage"
 
 
 def load_tests(path: Path) -> tuple[dict[int, float], dict[str, int]]:

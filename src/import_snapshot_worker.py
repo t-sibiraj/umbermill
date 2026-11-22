@@ -150,6 +150,31 @@ def snapshot(plan):
         }
     if Path(mod.__file__).resolve() != path:
         raise ValueError("different source origin")
+    if plan["kind"] in {"dialects", "time_maps"}:
+        from sqlglot import Dialect
+
+        if plan["kind"] == "dialects" and plan["field"]:
+            owner, field = plan["field"].split(":")
+            table = vars(vars(mod)[owner])[field]
+            if type(table) is not dict or not 0 < len(table) <= 4096 or not all(map(callable, table.values())):
+                return {"state": "opaque"}
+        families = plan["owner"].split(",")
+        if not 1 <= len(families) <= 12 or not all(name.isidentifier() for name in families):
+            raise ValueError("invalid dialect family")
+        for family in families:
+            instance = Dialect[family]()
+            instance.tokenizer()
+            instance.parser()
+            instance.generator()
+        if plan["kind"] == "time_maps":
+            # Replay immutable observations using the original SQLGlot converter.
+            import importlib.util as util
+            helper = Path(__file__).with_name("time_observations.py")
+            spec = util.spec_from_file_location("time_observations", helper)
+            module = util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module.changed_inputs(Dialect, families, Path(plan["field"]))
+        return {"state": "ready"}
     if plan["kind"] == "load":
         return {"state": "loaded"}
     owner = mod
