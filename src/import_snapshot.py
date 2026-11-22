@@ -152,16 +152,20 @@ def child_cpu():
 
 
 def run(root, name, path, kind, patch, owner="", field=""):
-    global _SECONDS_LEFT, _CPU_LEFT
-    available = min(_SECONDS_LEFT, _CPU_LEFT, 5 if kind == "collection" else 1.5)
-    if available < 0.12:
-        return None
-    start, cpu = time.monotonic(), child_cpu()
     plan = dict(
         root=str(root), name=name, path=path, kind=kind, owner=owner, field=field
     )
     if patch is not False:
         plan["source"] = patch
+    return _run(plan)
+
+
+def _run(plan):
+    global _SECONDS_LEFT, _CPU_LEFT
+    available = min(_SECONDS_LEFT, _CPU_LEFT, 5 if plan["kind"] == "collection" else 1.5)
+    if available < 0.12:
+        return None
+    start, cpu = time.monotonic(), child_cpu()
     try:
         proc = subprocess.run(
             [sys.executable, "-I", "-B", str(WORKER)],
@@ -201,6 +205,36 @@ def pristine_collection(root, prepared=None):
         return json.loads(raw)
     return run(
         root, "sqlglot.optimizer", "sqlglot/optimizer/__init__.py", "collection", False
+    )
+
+
+def collection_unchanged(selector, edits, *, families=()):
+    """Qualify all overrides together against the pinned collection receipt."""
+    baseline = pristine_collection(
+        selector.source_root, selector._maps_path.with_name("pristine-collection.json")
+    )
+    if (
+        not baseline
+        or baseline.get("state") != "collected"
+        or baseline["code"]
+        or baseline["errors"]
+        or not set(selector._snapshot_nodes) <= set(baseline["items"])
+    ):
+        return False
+    changed = set(edits)
+    observed = _run(dict(
+        root=str(selector.source_root), kind="collection", overrides=edits, families=sorted(families)
+    ))
+    return bool(
+        observed
+        and all(
+            baseline[key] == observed.get(key)
+            for key in ("items", "errors", "code", "state", "handled", "modules")
+        )
+        and all(
+            set(baseline[key]) - changed == set(observed[key]) - changed
+            for key in ("attempted", "opened")
+        )
     )
 
 

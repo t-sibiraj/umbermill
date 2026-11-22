@@ -19,6 +19,26 @@ class ReplayWork:
     defer: tuple[int, ...]
 
 
+class ReplayDeferral:
+    """Track which selected checks are now cheaper to leave to the workers."""
+
+    def __init__(self, job):
+        self.after_failure = set(job["after_failure"])
+        self.remaining = set(job.get("held_long", ()))
+        self.enders = {n: affected for n, affected in job.get("end_on_failure", ())}
+        self.failed = False
+        self.end = False
+
+    def observe_failure(self, number):
+        self.failed = True
+        if number in self.enders:
+            self.remaining.difference_update(self.enders[number])
+            self.end |= not self.remaining
+
+    def should_defer(self, number):
+        return self.end or self.failed and number in self.after_failure
+
+
 def _seconds(values, number, default=inf):
     try:
         value = values[number]
@@ -52,10 +72,25 @@ def _related(tests, sources, roster, fixture_sets):
     }
 
 
-def _packing_bound(total, maximum, count):
-    if not count:
-        return 0.0
-    return min(WORKER * w + max(maximum, total / w) for w in range(1, min(count, 8) + 1))
+def tail_deferrals(work, ordered, durations, estimated_cpu, roster, fixture_sets):
+    """Stop paying for the suffix if failures already require all dominant held tests."""
+    held_long = tuple(n for n in work.held if durations[n] > LONG)
+    if not held_long or max(durations[n] for n in held_long) < sum(durations[n] for n in ordered):
+        return (), ()
+    suffix_cost = 0.0
+    enders = []
+    for n in reversed(ordered):
+        affected = _related(held_long, (n,), roster, fixture_sets)
+        if affected and suffix_cost > WORKER:
+            enders.append((n, tuple(sorted(affected))))
+        suffix_cost += estimated_cpu[n]
+    return held_long, tuple(enders)
+
+
+def test_cpu_limit(estimate, duration, budget):
+    timeout = max(4.0, 25 * estimate)
+    worthwhile = max(4.0, 6 * estimate + 1.5, duration + WORKER)
+    return min(budget, timeout, worthwhile)
 
 
 def prepare_replay(
@@ -101,31 +136,11 @@ def prepare_replay(
     held = set(chosen) - run
     # A test that can determine an expensive sibling's fate has value beyond its own duration.
     evidence = _related(run, {n for n in held if simulated[n] > LONG}, roster, fixture_sets)
-    if selection.basis != "layout" and run:
-        fixed_cost = [simulated[n] for n in held if simulated[n] <= LONG or n in mandatory]
-        total, maximum, count = sum(fixed_cost), max(fixed_cost, default=0.0), len(fixed_cost)
-        # Compare the CPU saved by holding an additional short test with the increase
-        # in its group's packed schedule. Keep at least one actual observation.
-        replaceable = sorted(
-            (n for n in run - evidence if simulated[n] <= LONG and cpu[n] > 0.03),
-            key=lambda n: (-cpu[n] / (0.001 + simulated[n]), n),
-        )
-        best = _packing_bound(total, maximum, count)
-        savings, cut = 0.0, 0
-        for i, n in enumerate(replaceable, 1):
-            if i == len(run):
-                break
-            total += simulated[n]
-            maximum = max(maximum, simulated[n])
-            savings += cpu[n]
-            value = _packing_bound(total, maximum, count + i) - savings
-            if value < best:
-                best, cut = value, i
-        run.difference_update(replaceable[:cut])
-
-    defer = {
-        n for n in run - evidence if cpu[n] > max(0.03, simulated[n] / 2)
-    }
+    # An entirely admitted fresh replay has already paid the setup cost and has
+    # CPU to verify each check, including those that follow its first failure.
+    defer = set()
+    if held or selection.basis != "fresh":
+        defer = {n for n in run - evidence if cpu[n] > max(0.03, simulated[n] / 2)}
     return ReplayWork(
         tuple(n for n in chosen if n in run),
         tuple(n for n in chosen if n not in run),
@@ -166,7 +181,8 @@ def finish_replay(
 
     passed = {n for n, v in outcomes.items() if v == "pass" and n in candidates}
     kept = (candidates - passed) | mandatory | failed
-    uncertain = {n for n in work.run if n not in passed and n not in failed}
+    deferred = {n for n, decision in outcomes.items() if decision == "deferred"}
+    uncertain = set(work.run) - passed - failed - deferred
     # Missing receipts, including after the first failure, retain the remaining candidates.
     if (
         status != "complete"
@@ -178,7 +194,7 @@ def finish_replay(
         return kept
     # A direct unknown/stopped receipt for a held test may come from a staged attempt.
     # Its siblings also see that uncertainty as adverse evidence.
-    unresolved = {n for n in candidates if n in outcomes and n not in failed and n not in passed}
+    unresolved = {n for n in candidates if n in outcomes and n not in failed and n not in passed and n not in deferred}
     held = set(work.held) & candidates
     long = {
         n

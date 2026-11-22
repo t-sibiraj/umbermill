@@ -17,6 +17,7 @@ from .replay_limits import ReplayMemory
 from .replay_trace import trace_decision
 
 WORKER = Path(__file__).with_name("verification_worker.py")
+FRESH_OVERHEAD_CPU = 1.5
 
 
 def prepare_tree(base, tree, changes):
@@ -99,8 +100,10 @@ class Processes:
         offset = 0
         process = None
         memory = ReplayMemory()
+        overhead = 0.0 if hot else FRESH_OVERHEAD_CPU
+
         def observe():
-            nonlocal active, item_start, offset
+            nonlocal active, item_start, offset, overhead
             if not journal.exists():
                 return
             with journal.open('rb') as stream:
@@ -111,7 +114,9 @@ class Processes:
                     row = json.loads(line)
                     events.append(row)
                     offset += len(line)
-                    if row[0] == 'start':
+                    if row[0] == 'ready':
+                        overhead = min(overhead, max(0.0, cpu() - start))
+                    elif row[0] == 'start':
                         active = row[1]
                         item_start = cpu()
                     elif row[0] == 'end':
@@ -138,7 +143,7 @@ class Processes:
                 now = cpu()
                 if time.monotonic() >= finish_time:
                     limit = "wall"
-                elif now - start >= budget:
+                elif now - start >= budget + overhead:
                     limit = "replay_cpu"
                 elif memory.over(process.pid if process is not None else None):
                     limit = "memory"
@@ -149,6 +154,7 @@ class Processes:
                 if limit:
                     trace_decision("watchdog", limit=limit, test=active, warm=hot,
                                    replay_cpu=round(now - start, 4),
+                                   overhead_cpu=round(overhead, 4),
                                    test_cpu=round(now - item_start, 4) if active is not None else None)
                     return "stop", active, events
                 time.sleep(.015)

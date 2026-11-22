@@ -8,7 +8,7 @@ from .file_selection import file_selection
 from .impact import (_DEFINITION_HOOKS, _accepts_fixture_projection, _changed_progress_signal, _changed_statement_ranges,
                      _describe_module, _paired_inputs, _PINNED_FIXTURE_HELPERS_SHA, _project_sql_fixture,
                      _replaced_expression_statement, _same_outline, _test_hits, _yielded_lines)
-from .import_snapshot import pristine_collection, run
+from .import_snapshot import collection_unchanged, run
 from .method_plan import select as method_consumers
 from .patches import UnsupportedPatch, apply_change, parse_patch
 from .position import candidate_trivia, position_only, qualify_parts
@@ -90,17 +90,7 @@ def _test_readers(data, edit):
 
 def _collection_agrees(data, edit):
     """Check roster, import origins, handled failures and discovery after replacing this file."""
-    if not data._collection.get(edit.path, 0):
-        return True
-    before = pristine_collection(data.source_root, data._maps_path.with_name("pristine-collection.json"))
-    if (not before or before.get("state") != "collected" or before["code"] or before["errors"]
-            or not set(data._snapshot_nodes) <= set(before["items"])):
-        return False
-    name = edit.path[:-3].replace("/", ".")
-    after = run(data.source_root, name, edit.path, "collection", edit.replacement)
-    if not after or any(before[k] != after.get(k) for k in ("state", "code", "items", "errors", "handled", "modules")):
-        return False
-    return all(set(before[k]) - {edit.path} == set(after[k]) - {edit.path} for k in ("opened", "attempted"))
+    return not data._collection.get(edit.path, 0) or collection_unchanged(data, {edit.path: edit.replacement})
 
 
 def _dispatch(data, edit):
@@ -345,6 +335,8 @@ def _decision(data, changes, patch):
 
 def plan_patch(evidence, patch: str) -> Selection:
     """Return one complete plan for this patch; partial file evidence cannot discard other files."""
+    if not patch.strip():
+        return Selection([], "empty patch", False, "static")
     try:
         if evidence.unavailable:
             raise UnsupportedPatch(evidence.unavailable)

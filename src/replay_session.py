@@ -11,7 +11,7 @@ import time
 from . import executor_stage, token_replay
 from .patches import parse_patch
 from .probe_worker import cpu
-from .replay_policy import finish_replay, merge_outcomes, prepare_replay
+from .replay_policy import finish_replay, merge_outcomes, prepare_replay, tail_deferrals, test_cpu_limit
 from .replay_schedule import pack
 from .replay_trace import trace_decision
 from .scheduler import evaluate_schedule
@@ -52,12 +52,13 @@ def _outcomes(events, numbers, complete):
         elif kind == "end":
             test, verdict, cost = record
             unstable |= (test != active or test in observed
-                         or verdict not in {"pass", "failed", "unknown", "partial"})
+                         or verdict not in {"pass", "failed", "unknown", "partial", "deferred"})
             if verdict == "failed" and test in admitted:
                 failed.add(test)
             if test == active and test in admitted:
                 observed[test] = verdict
-                timings[test] = max(0.0, float(cost))
+                if verdict != "deferred":
+                    timings[test] = max(0.0, float(cost))
             active = None
     if complete and (active is not None or set(observed) != admitted):
         unstable = True
@@ -97,7 +98,7 @@ class ReplaySession:
 
     def _followup(self, work, selected, protected, observed, timings, budget):
         pending = selected - {n for n, verdict in observed.items() if verdict == "pass"}
-        ready = {n for n in work.defer if observed.get(n) in (None, "unknown")}
+        ready = {n for n in work.defer if observed.get(n) in (None, "unknown", "deferred")}
         ready.update(n for n in work.held
                      if n not in protected and n not in observed and self.durations[n] <= 5)
         reference = sum(self.durations[n] for n in timings)
@@ -138,7 +139,7 @@ class ReplaySession:
         return min(opportunities, default=None)
 
     def _run(self, scratch, index, changes, patch, numbers, deferred, available, hot, units, native,
-             *, scoped=False, stage=False):
+             *, scoped=False, stage=False, tail=((), ())):
         tree = scratch / f"source-{index}"
         if not prepare_tree(self.root, tree, changes):
             return "uncertain", None, {}, {}, False
@@ -157,11 +158,13 @@ class ReplaySession:
                 "maps": str(self.maps),
                 "members": members,
                 "after_failure": sorted(deferred),
+                "held_long": tail[0],
+                "end_on_failure": tail[1],
                 "units": units,
                 "native_only": native,
                 "direct": not (stage or native),
             }
-            limits = {n: min(available, max(.4, 6 * self.times[n] + .25)) for n in numbers}
+            limits = {n: test_cpu_limit(self.times[n], self.durations[n], available) for n in numbers}
             status, stopped, events = self.processes.run(job, scratch / f"job-{index}.json", limits,
                                                          available, self.deadline, hot)
             observed, timings, unstable = _outcomes(events, numbers, status == "complete")
@@ -219,8 +222,10 @@ class ReplaySession:
             protected = protected | unknown
             work = prepare_replay(selection, self.durations, self.roster, self.times,
                                   budget, self.fixture_sets, protected=protected)
+            ordered = tuple(sorted(work.run, key=self.order.__getitem__))
+            tail = tail_deferrals(work, ordered, self.durations, self.times, self.roster, self.fixture_sets)
             trace_decision("replay_plan", budget=budget, run=work.run, held=work.held,
-                           defer=work.defer, protected=sorted(protected))
+                           defer=work.defer, protected=sorted(protected), end_on_failure=tail[1])
             if not work.run:
                 return selected
             with TemporaryDirectory(prefix="umbermill-replay-") as name:
@@ -230,7 +235,7 @@ class ReplaySession:
                 hot = warm and all(path.startswith("sqlglot/") for path in paths) and self.processes.hot()
                 status, stopped, observed, timings, unstable = self._run(
                     scratch, 0, changes, patch, work.run, work.defer, budget, hot, False, native,
-                    scoped=scoped)
+                    scoped=scoped, tail=tail)
                 if status == "state":
                     return self._after_state(selected, protected, observed, stopped)
                 if unstable:
@@ -242,7 +247,7 @@ class ReplaySession:
                 if status in {"fresh", "uncertain"} and hot and budget - (cpu() - started) >= .25:
                     status, stopped, cold, _, unstable = self._run(
                         scratch, 1, changes, patch, work.run, work.defer,
-                        budget - (cpu() - started), False, False, native, scoped=scoped)
+                        budget - (cpu() - started), False, False, native, scoped=scoped, tail=tail)
                     if status == "state":
                         return self._after_state(selected, protected, cold, stopped)
                     if unstable:

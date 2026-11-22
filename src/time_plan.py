@@ -8,7 +8,7 @@ import json
 
 from . import BASE_COMMIT
 from .deferred import warning_free
-from .import_snapshot import run
+from .import_snapshot import collection_unchanged, run
 from .mapping_value import _strings
 from .patches import UnsupportedPatch, apply_change
 
@@ -114,8 +114,9 @@ def select(selector, changes, patch):
         if not isinstance(state, dict) or state.get("state") != "ready":
             return None
         mask = (int(index["always"], 16) | int(index["field_readers"][path], 16) | warm | cold | selector._unmapped
-                | selector._reads.get(path, 0) | selector._collection.get(path, 0)
-                | selector._files.get(path, 0) | (selector._position_readers or {}).get(path, 0))
+                | (selector._position_readers or {}).get(path, 0))
+        if not collection_unchanged(selector, {path: new}):
+            mask |= selector._reads.get(path, 0) | selector._collection.get(path, 0) | selector._files.get(path, 0)
         for n in direct | set(state["affected"]):
             if type(n) is not int or not 0 <= n < index["size"]:
                 return None

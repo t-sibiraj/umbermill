@@ -7,7 +7,7 @@ import json
 
 from .deferred import warning_free
 from .module_cold import cold_mask
-from .import_snapshot import run
+from .import_snapshot import collection_unchanged, run
 from .patches import UnsupportedPatch, apply_change
 from .readers import number
 
@@ -258,8 +258,8 @@ def _effects(selector, change, catalog):
     cold = selector._isolated_index.changed(path, old, new)
     if warm is None or cold is None:
         return None
-    readers = helper_mask | warm | cold | selector._reads.get(path, 0) | selector._collection.get(path, 0)
-    return effects, readers | (selector._position_readers or {}).get(path, 0), new
+    readers = helper_mask | warm | cold | (selector._position_readers or {}).get(path, 0)
+    return effects, readers, new
 
 
 def _ancestry(owner, classes):
@@ -303,7 +303,7 @@ def _mask(values, size):
     return result
 
 
-def _scalar_readers(selector, catalog, index, edits):
+def _scalar_readers(selector, catalog, index, edits, *, receiver_only=False):
     classes = catalog["classes"]
     changed = {(e[1], e[2]): e[4] for e in edits}
     size = len(selector.all_tests)
@@ -328,13 +328,18 @@ def _scalar_readers(selector, catalog, index, edits):
         for owner in owners:
             values.append(index["reflection"].get(_qualified(owner), ""))
         mask |= _mask(values, size)
-        # Include every generic source site that names the flag, across dialects.
         for path, lines in catalog["readers"].get(field, {}).items():
+            collection = selector._collection_sites.get(path, {})
+            if receiver_only:
+                if any(collection.get(line, 0) for line in lines):
+                    raise ValueError("scalar field consumed during collection")
+                continue
+            # Without an unchanged collection, keep generic access sites.
             sites = selector._sites.get(path, {})
             for line in lines:
                 mask |= sites.get(line, 0)
                 if path.startswith("tests/"):
-                    mask |= selector._collection_sites.get(path, {}).get(line, 0)
+                    mask |= collection.get(line, 0)
     return mask
 
 
@@ -477,7 +482,7 @@ def select(selector, changes, patch):
             return None
         catalog, index = _catalog(selector._maps_path)
         effects = []
-        mask = selector._unmapped
+        mask, importers = selector._unmapped, 0
         probes = []
         for c in changes:
             result = _effects(selector, c, catalog)
@@ -487,23 +492,48 @@ def select(selector, changes, patch):
             probes.append((c.old_path, source, {item[1] for item in items}))
             effects.extend(items)
             mask |= readers
+            importers |= selector._reads.get(c.old_path, 0) | selector._collection.get(c.old_path, 0)
         scalar = [e for e in effects if e[0] == "scalar"]
-        if scalar:
-            mask |= _scalar_readers(selector, catalog, index, scalar)
-        for edit in effects:
-            if edit[0] == "table":
-                mask |= _callback_readers(selector, catalog, index, edit)
         if len(probes) > 1 and any(e[0] != "scalar" for e in effects):
             # A parent's copied table and a child's simultaneous modification can interact.
             return None
+        qualified = []
         for path, source, owners in probes:
             families = {child.rsplit(".", 2)[-2] for child in catalog["classes"]
                         if any(parent in owners for parent in _ancestry(child, catalog["classes"]))}
             if not families or len(families) > 12:
                 return None
-            module = path[:-3].replace("/", ".")
-            if run(selector.source_root, module, path, "dialects", source, ",".join(sorted(families)), "") != {"state":"ready"}:
-                return None
+            qualified.append((path, source, families))
+        exact = None
+        if len(scalar) == len(effects) and all(
+            path.startswith(("sqlglot/parsers/", "sqlglot/generators/")) for path, _, _ in probes
+        ):
+            # Narrow only class values whose expected concrete receivers were
+            # observed. Test collection has to agree after applying every edit
+            # together, especially if a flag moves from a parent to a child.
+            try:
+                received = _scalar_readers(selector, catalog, index, scalar, receiver_only=True)
+            except ValueError:
+                pass
+            else:
+                all_families = set().union(*(families for _, _, families in qualified))
+                if len(all_families) <= 12 and collection_unchanged(
+                    selector, {path: source for path, source, _ in qualified}, families=all_families
+                ):
+                    exact = received
+        if exact is None:
+            for path, source, families in qualified:
+                module = path[:-3].replace("/", ".")
+                if run(selector.source_root, module, path, "dialects", source, ",".join(sorted(families))) != {"state": "ready"}:
+                    return None
+            mask |= importers
+            if scalar:
+                mask |= _scalar_readers(selector, catalog, index, scalar)
+        else:
+            mask |= exact
+        for edit in effects:
+            if edit[0] == "table":
+                mask |= _callback_readers(selector, catalog, index, edit)
         for n in (*index["guards"], *index["uninstrumented_tests"]):
             mask |= 1 << n
         return {n for n in selector.all_tests if mask >> n & 1}

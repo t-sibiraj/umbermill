@@ -111,8 +111,50 @@ def digest(value):
         return None
 
 
+def construct_dialects(families):
+    from sqlglot import Dialect
+
+    if not 1 <= len(families) <= 12 or not all(name.isidentifier() for name in families):
+        raise ValueError("invalid dialect family")
+    for family in families:
+        instance = Dialect[family]()
+        instance.tokenizer()
+        instance.parser()
+        instance.generator()
+    return Dialect
+
+
 def snapshot(plan):
     root = Path(plan["root"]).resolve()
+    if "overrides" in plan:
+        edits = plan["overrides"]
+        if plan["kind"] != "collection" or not 1 <= len(edits) <= 6:
+            raise ValueError("invalid collection overrides")
+        os.chdir(root)
+        sys.path.insert(0, str(root))
+        sys.dont_write_bytecode = True
+        for relative, source in edits.items():
+            path = root / relative
+            parts = Path(relative).with_suffix("").parts
+            if (
+                len(parts) < 2
+                or parts[0] != "sqlglot"
+                or not all(part.isidentifier() for part in parts)
+                or path.suffix != ".py"
+                or path.name == "__init__.py"
+                or path.resolve() != path
+                or not path.is_file()
+                or not isinstance(source, str)
+            ):
+                raise ValueError("unexpected collection override")
+            name = ".".join(parts)
+            if name in sys.modules:
+                raise ValueError("unexpected prior module")
+            sys.meta_path.insert(0, Override(name, str(path), source))
+        receipt = collect(root)
+        if families := plan.get("families"):
+            construct_dialects(families)
+        return receipt
     path = (root / plan["path"]).resolve()
     if not path.is_relative_to(root) or not path.is_file():
         raise ValueError("source outside baseline")
@@ -151,21 +193,13 @@ def snapshot(plan):
     if Path(mod.__file__).resolve() != path:
         raise ValueError("different source origin")
     if plan["kind"] in {"dialects", "time_maps"}:
-        from sqlglot import Dialect
-
         if plan["kind"] == "dialects" and plan["field"]:
             owner, field = plan["field"].split(":")
             table = vars(vars(mod)[owner])[field]
             if type(table) is not dict or not 0 < len(table) <= 4096 or not all(map(callable, table.values())):
                 return {"state": "opaque"}
         families = plan["owner"].split(",")
-        if not 1 <= len(families) <= 12 or not all(name.isidentifier() for name in families):
-            raise ValueError("invalid dialect family")
-        for family in families:
-            instance = Dialect[family]()
-            instance.tokenizer()
-            instance.parser()
-            instance.generator()
+        Dialect = construct_dialects(families)
         if plan["kind"] == "time_maps":
             # Replay immutable observations using the original SQLGlot converter.
             import importlib.util as util

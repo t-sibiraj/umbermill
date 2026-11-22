@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from types import FunctionType
 
+from .replay_policy import ReplayDeferral
+
 
 class Unsupported(Exception):
     pass
@@ -234,7 +236,7 @@ def run(job, numbers, event, clock, snapshot):
     except Exception:
         return False
     result = Records(numbers, cases, event, clock, snapshot)
-    deferred = set(job["after_failure"])
+    deferral = ReplayDeferral(job)
     stop_after_failure = job.get("stop_after_failure", False)
 
     class Suite(unittest.TestSuite):
@@ -242,11 +244,15 @@ def run(job, numbers, event, clock, snapshot):
 
         def __iter__(self):
             for case in super().__iter__():
-                if result.bad and (stop_after_failure or result.labels[id(case)] in deferred):
+                label = result.labels[id(case)]
+                if deferral.should_defer(label) or result.bad and stop_after_failure:
                     result.startTest(case)
+                    result.answer = "deferred"
                     result.stopTest(case)
                 else:
                     yield case
+                    if result.answer == "failed":
+                        deferral.observe_failure(label)
 
     event("ready")
     Suite(list(cases.values())).run(result)

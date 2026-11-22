@@ -96,6 +96,7 @@ def replay(job_path):
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     import pytest
     from umbermill.probe_worker import cpu
+    from umbermill.replay_policy import ReplayDeferral
 
     expected = job['collection']
     files = list(dict.fromkeys(name.split('::', 1)[0] for name in expected))
@@ -132,7 +133,8 @@ def replay(job_path):
         class Reporter:
             def __init__(self):
                 self.seen = {}
-                self.bad = False
+                self.deferral = ReplayDeferral(job)
+                self.deferred = set()
                 self.matched = False
 
             @pytest.hookimpl(trylast=True)
@@ -156,7 +158,8 @@ def replay(job_path):
 
             @pytest.hookimpl(tryfirst=True)
             def pytest_runtest_setup(self, item):
-                if self.bad and numbers[item.nodeid] in job["after_failure"]:
+                if self.deferral.should_defer(numbers[item.nodeid]):
+                    self.deferred.add(item.nodeid)
                     pytest.skip("remaining short check deferred")
 
             @pytest.hookimpl(wrapper=True)
@@ -178,7 +181,6 @@ def replay(job_path):
                     event('failure', numbers[report.nodeid], report.when)
                 if report.failed or report.skipped or getattr(report, "wasxfail", None):
                     row[1].add("fail" if report.failed else "unknown")
-                self.bad |= report.failed
 
             def pytest_runtest_logfinish(self, nodeid, location):
                 stages, results, began, before = self.seen.pop(nodeid)
@@ -187,6 +189,9 @@ def replay(job_path):
                     event("state", numbers[nodeid], [field for field in snapshot if snapshot[field] != before[field]])
                 if "fail" in results:
                     verdict = "failed"
+                    self.deferral.observe_failure(numbers[nodeid])
+                elif nodeid in self.deferred:
+                    verdict = "deferred"
                 elif results or stages != {"setup", "call", "teardown"}:
                     verdict = "unknown"
                 elif reducer is not None and nodeid in getattr(reducer, "partial", ()):
