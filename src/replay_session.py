@@ -94,6 +94,24 @@ class ReplaySession:
         reduced = pack(tests - set(probe), self.durations)
         return evaluate_schedule(original, self.durations) - evaluate_schedule(reduced, self.durations)
 
+    def _followup(self, work, selected, protected, observed, timings, budget):
+        pending = selected - {n for n, verdict in observed.items() if verdict == "pass"}
+        ready = {n for n in work.defer if observed.get(n) in (None, "unknown")}
+        ready.update(n for n in work.held
+                     if n not in protected and n not in observed and self.durations[n] <= 5)
+        reference = sum(self.durations[n] for n in timings)
+        speed = max(.1, min(1.0, sum(timings.values()) / reference)) if reference else 1.0
+        costs = {n: max(.003, self.times[n] * speed) for n in ready}
+        ranked = sorted(ready, key=lambda n: (-self.durations[n] / costs[n], n))
+        proposed, charge = [], .35
+        for n in ranked:
+            if charge + costs[n] <= budget:
+                proposed.append(n)
+                charge += costs[n]
+        if proposed and self._saving(pending, proposed) >= max(2.0, charge):
+            return tuple(proposed)
+        return ()
+
     def _abbreviated(self, selection, work, patch, paths, still_selected, remaining):
         if selection.basis == "layout" or remaining < .3:
             return None
@@ -240,13 +258,11 @@ class ReplaySession:
                             later[other_stop] = "stopped"
                         observed = merge_outcomes(observed, later)
                 if status == "complete":
-                    pending = selected - {n for n, verdict in observed.items() if verdict == "pass"}
-                    deferred = tuple(n for n in work.defer if observed.get(n) in (None, "unknown"))
                     balance = budget - (cpu() - started)
-                    if (deferred and balance > .25
-                            and self._saving(pending, deferred) > .35 + sum(self.times[n] for n in deferred)):
+                    followup = self._followup(work, selected, protected, observed, timings, balance)
+                    if followup:
                         retry_status, follow_state, later, _, still_safe = self._run(
-                            scratch, 2, changes, patch, deferred, (), balance, False, False, native,
+                            scratch, 2, changes, patch, followup, (), balance, False, False, native,
                             scoped=scoped)
                         if retry_status == "state":
                             return self._after_state(selected, protected, later, follow_state)
