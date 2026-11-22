@@ -94,7 +94,7 @@ def test_cpu_limit(estimate, duration, budget):
 
 
 def prepare_replay(
-    selection, durations, roster, estimated_cpu, budget, fixture_sets, *, protected=()
+    selection, durations, roster, estimated_cpu, budget, fixture_sets, *, protected=(), observers=()
 ):
     """Split candidates in roster order; defer is a subset of run that can stop after a failure.
 
@@ -117,10 +117,12 @@ def prepare_replay(
     }
     fixed = set(chosen) - affordable
     evidence = _related(affordable, {n for n in fixed if simulated[n] > LONG}, roster, fixture_sets)
+    observers = set(observers)
     ordered = sorted(
         affordable,
         key=lambda n: (
             n not in evidence,
+            n not in observers,
             -(simulated[n] + REPLAY_COST_FLOOR) / (cpu[n] + REPLAY_COST_FLOOR),
             cpu[n],
             n,
@@ -140,7 +142,7 @@ def prepare_replay(
     # CPU to verify each check, including those that follow its first failure.
     defer = set()
     if held or selection.basis != "fresh":
-        defer = {n for n in run - evidence if cpu[n] > max(0.03, simulated[n] / 2)}
+        defer = {n for n in run - evidence - observers if cpu[n] > max(0.03, simulated[n] / 2)}
     return ReplayWork(
         tuple(n for n in chosen if n in run),
         tuple(n for n in chosen if n not in run),

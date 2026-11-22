@@ -80,6 +80,11 @@ class ReplaySession:
         self.order = {number: positions[node] for number, node in roster.items() if node in positions}
         self.times = {test: max(.002, seconds) for test, seconds in durations.items()}
         self.processes = Processes(self.root)
+        reader_mask = getattr(getattr(evidence, "_reader_index", None), "guard", 0)
+        # These checks cover source or import observers that the ordinary
+        # candidate evidence cannot resolve. Once admitted, verify them even
+        # when an unrelated case has already failed.
+        self.readers = frozenset(n for n in roster if reader_mask & (1 << n))
         self.fixture_sets = {}
         for path, mask in getattr(evidence, "_reads", {}).items():
             if path.startswith("tests/fixtures/") and path.endswith(".sql"):
@@ -197,10 +202,13 @@ class ReplaySession:
 
     def choose(self, selection, patch, protected):
         selected = set(selection.tests) | protected
-        if (not self.collection or not selection.tests or selection.basis in {"static", "shared state"}
+        # A fallback plan has no proof that replay preserves the original
+        # import and collection context needed to trust passing outcomes.
+        if (selection.fallback or not self.collection or not selection.tests
+                or selection.basis in {"static", "shared state"}
                 or time.monotonic() >= self.deadline):
             trace_decision("replay_skipped", collection=bool(self.collection), mode=selection.basis,
-                           deadline_expired=time.monotonic() >= self.deadline)
+                           fallback=selection.fallback, deadline_expired=time.monotonic() >= self.deadline)
             return selected
         native = selection.basis == "layout"
         warm = selection.basis in {"hot", "fixture"}
@@ -215,13 +223,13 @@ class ReplaySession:
                 and change.old_path.startswith(("sqlglot/", "tests/")) for change in changes
             )):
                 return selected
-            scoped = not (native or selection.fallback) and all(
+            scoped = not native and all(
                 path.startswith("sqlglot/") and path.endswith(".py")
                 or path.startswith("tests/fixtures/") and path.endswith(".sql") for path in paths)
             unknown = selected - self.order.keys()
             protected = protected | unknown
             work = prepare_replay(selection, self.durations, self.roster, self.times,
-                                  budget, self.fixture_sets, protected=protected)
+                                  budget, self.fixture_sets, protected=protected, observers=self.readers)
             ordered = tuple(sorted(work.run, key=self.order.__getitem__))
             tail = tail_deferrals(work, ordered, self.durations, self.times, self.roster, self.fixture_sets)
             trace_decision("replay_plan", budget=budget, run=work.run, held=work.held,
