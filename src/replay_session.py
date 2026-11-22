@@ -228,7 +228,9 @@ class ReplaySession:
             if not work.run:
                 return selected
             with TemporaryDirectory(prefix="umbermill-replay-") as name:
-                scratch = Path(name)
+                # The worker compares resolved import origins to the patched tree.
+                # Keep the job and tree paths canonical even when TMPDIR is a symlink.
+                scratch = Path(name).resolve()
                 hot = warm and all(path.startswith("sqlglot/") for path in paths) and self.processes.hot()
                 status, stopped, observed, timings, unstable = self._run(
                     scratch, 0, changes, patch, work.run, work.defer, budget, hot, False, native,
