@@ -117,17 +117,22 @@ class ReplaySession:
                 opportunities.append((charge - gain, test, units, min(gain, remaining)))
         return min(opportunities, default=None)
 
-    def _run(self, scratch, index, changes, patch, numbers, deferred, available, hot, units, native, *, stage=False):
+    def _run(self, scratch, index, changes, patch, numbers, deferred, available, hot, units, native,
+             *, scoped=False, stage=False):
         tree = scratch / f"source-{index}"
         if not prepare_tree(self.root, tree, changes):
             return "uncertain", None, {}, {}, False
         try:
             members = [(test, self.roster[test]) for test in sorted(numbers, key=self.order.__getitem__)]
+            collection = self.collection
+            if scoped:
+                files = {node.partition("::")[0] for _, node in members}
+                collection = tuple(node for node in collection if node.partition("::")[0] in files)
             job = {
                 "tree": str(tree),
                 "base": str(self.root),
                 "changes": [change.old_path for change in changes],
-                "collection": self.collection,
+                "collection": collection,
                 "patch": patch,
                 "maps": str(self.maps),
                 "members": members,
@@ -164,6 +169,9 @@ class ReplaySession:
                 and change.old_path.startswith(("sqlglot/", "tests/")) for change in changes
             )):
                 return selected
+            scoped = not (native or selection.fallback) and all(
+                path.startswith("sqlglot/") and path.endswith(".py")
+                or path.startswith("tests/fixtures/") and path.endswith(".sql") for path in paths)
             unknown = selected - self.order.keys()
             protected = protected | unknown
             work = prepare_replay(selection, self.durations, self.roster, self.times,
@@ -174,7 +182,8 @@ class ReplaySession:
                 scratch = Path(name)
                 hot = warm and all(path.startswith("sqlglot/") for path in paths) and self.processes.hot()
                 status, stopped, observed, timings, unstable = self._run(
-                    scratch, 0, changes, patch, work.run, work.defer, budget, hot, False, native)
+                    scratch, 0, changes, patch, work.run, work.defer, budget, hot, False, native,
+                    scoped=scoped)
                 if unstable:
                     return selected
                 for test, spent in timings.items():
@@ -184,7 +193,7 @@ class ReplaySession:
                 if status in {"fresh", "uncertain"} and hot and budget - (cpu() - started) >= .25:
                     status, stopped, cold, _, unstable = self._run(
                         scratch, 1, changes, patch, work.run, work.defer,
-                        budget - (cpu() - started), False, False, native)
+                        budget - (cpu() - started), False, False, native, scoped=scoped)
                     if unstable:
                         return selected
                     observed = merge_outcomes({n: v for n, v in observed.items() if v == "failed"}, cold)
@@ -197,7 +206,8 @@ class ReplaySession:
                     charge = .35 + sum(self.times[n] for n in unrun)
                     if unrun and charge < balance and self._saving(pending, unrun) > charge:
                         _, other_stop, later, _, unsafe = self._run(
-                            scratch, 2, changes, patch, unrun, (), balance, False, False, native)
+                            scratch, 2, changes, patch, unrun, (), balance, False, False, native,
+                            scoped=scoped)
                         if unsafe:
                             return selected
                         if other_stop is not None and later.get(other_stop) != "failed":
@@ -210,7 +220,8 @@ class ReplaySession:
                     if (deferred and balance > .25
                             and self._saving(pending, deferred) > .35 + sum(self.times[n] for n in deferred)):
                         retry_status, _, later, _, still_safe = self._run(
-                            scratch, 2, changes, patch, deferred, (), balance, False, False, native)
+                            scratch, 2, changes, patch, deferred, (), balance, False, False, native,
+                            scoped=scoped)
                         if not still_safe and retry_status == "complete":
                             observed = merge_outcomes(observed, later)
                     balance = budget - (cpu() - started)
@@ -224,6 +235,7 @@ class ReplaySession:
                         if not unstable and extra_status == "complete":
                             observed = merge_outcomes(observed, extra)
             return finish_replay(selection, work, observed, self.durations, self.roster,
-                                 self.fixture_sets, protected=protected, status=status)
-        except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+                                 self.fixture_sets, protected=protected,
+                                 status="stopped" if status == "stop" else status)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
             return selected

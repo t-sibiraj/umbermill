@@ -31,8 +31,11 @@ CASE_INTERNALS = {"__call__", "__getattribute__", "__getattr__", "__init__", "__
 def candidate(job, tree):
     if not job.get("direct") or job.get("native_only") or job.get("units") or job.get("stage"):
         return False
-    if not job["changes"] or any(not (p.startswith("sqlglot/") and p.endswith(".py"))
-                                 for p in job["changes"]):
+    if not job["changes"] or any(
+        not (p.startswith("sqlglot/") and p.endswith(".py")
+             or p.startswith("tests/fixtures/") and p.endswith(".sql"))
+        for p in job["changes"]
+    ):
         return False
     if any(RUNNER_OBSERVER.search(line[1:]) for line in job["patch"].splitlines()
            if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))):

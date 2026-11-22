@@ -253,7 +253,7 @@ def _decision(data, changes, patch):
                 resolved = file_selection(data, patch)
                 if resolved is not None:
                     return resolved, "fixture", "original input and structural observers", False
-                return broad, "fresh", "unresolved test or data change", False
+                return broad, "fresh", "unresolved test or data change", True
             bits |= branch
         basis = "fixture" if any(e.path.startswith("tests/") for e in edits) else "static"
         return bits, basis, "observed source and fixture readers", False
@@ -281,7 +281,7 @@ def _decision(data, changes, patch):
             if combined is not None:
                 return combined[0], "fresh", "composed source coordinates, ordinary code and fixture readers", False
         # A modified test can start consuming a changed production file for the first time.
-        return broad, "fresh", "mixed test input and production source", False
+        return broad, "fresh", "mixed test input and production source", True
     layout = slots_plan.select(data, changes, patch)
     if layout is not None:
         return _mask(layout), "layout", "class layout and inherited consumers", False
@@ -337,7 +337,7 @@ def _decision(data, changes, patch):
                 imports = import_effect(data, edit.change)
                 if imports is not None:
                     return imports[0], "fresh", imports[1], False
-            return broad, "fresh", "unresolved initialization or call effects", False
+            return broad, "fresh", "unresolved initialization or call effects", True
         bits |= effect
     return bits, "hot" if single else "fresh", "changed original statements, callbacks and cold readers", False
 

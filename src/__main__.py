@@ -131,11 +131,18 @@ def main():
         always = {n for n in roster if evidence._unmapped & (1 << n)}
         session = ReplaySession(evidence, roster, durations, deadline - 2.0)
         schedules = []
+        trace = os.environ.get("UMBERMILL_REPLAY_TRACE") == "1"
         try:
             for name, patch, selection in cases:
                 placement.release_if_delayed()
                 needed = always | source_doc_readers(evidence, patch, nodes) | changed_comparisons(evidence, patch)
+                if trace:
+                    began = time.monotonic()
+                    print(f"replay {name} {selection.basis} candidates={len(selection.tests)}", file=sys.stderr, flush=True)
                 chosen = session.choose(selection, patch, needed)
+                if trace:
+                    print(f"replay {name} selected={len(chosen)} elapsed={time.monotonic() - began:.3f}",
+                          file=sys.stderr, flush=True)
                 schedules.append((name, chosen, selection.reason))
         finally:
             session.close()
