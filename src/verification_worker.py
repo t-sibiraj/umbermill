@@ -7,6 +7,7 @@ import json
 import linecache
 import os
 from pathlib import Path
+import shutil
 import sys
 import signal
 import warnings
@@ -45,6 +46,12 @@ def direct_or_pytest(job, job_path, numbers, event, clock):
     tasks = Path("/proc/self/task")
     if not tasks.is_dir() or len(os.listdir(tasks)) != 1:
         return False
+    base = Path(job["base"]).resolve()
+    if (tree.resolve() != tree or tree.parent != job_path.resolve().parent
+            or not tree.name.startswith("source-") or not tree.name[7:].isdigit()
+            or base.is_relative_to(tree) or tree.is_relative_to(base)):
+        return False
+    original_tree = tree.stat()
     # Collection imports production code. A rejected child may already have
     # modified its Python state or its files, so restart pytest from a clean tree.
     pid = os.fork()
@@ -60,11 +67,14 @@ def direct_or_pytest(job, job_path, numbers, event, clock):
     from umbermill.verification_process import prepare_tree
     from umbermill.patches import parse_patch
 
-    clean = tree.with_name(tree.name + "-pytest")
-    if not prepare_tree(Path(job["base"]), clean, parse_patch(job["patch"])):
+    if not os.path.samestat(original_tree, tree.lstat()):
+        return True
+    os.chdir(base)
+    shutil.rmtree(tree)
+    if not prepare_tree(base, tree, parse_patch(job["patch"])):
         return True
     cold_job = job_path.with_suffix(".pytest-job")
-    cold_job.write_text(json.dumps(dict(job, tree=str(clean), direct=False)))
+    cold_job.write_text(json.dumps(dict(job, direct=False)))
     os.execv(sys.executable, [sys.executable, "-I", "-B", str(Path(__file__).resolve()), str(cold_job)])
 
 
