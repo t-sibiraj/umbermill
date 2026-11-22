@@ -18,6 +18,11 @@ from .verification_process import Processes, prepare_tree
 from .verification_units import eligible as has_units
 
 
+def trace_decision(event, **details):
+    if os.environ.get("UMBERMILL_REPLAY_TRACE") == "2":
+        print(json.dumps({"event": event, **details}, separators=(",", ":")), file=sys.stderr, flush=True)
+
+
 def _collection(maps, roster):
     try:
         data = json.loads((maps / "pristine-collection.json").read_bytes())
@@ -177,6 +182,8 @@ class ReplaySession:
                 print(f"attempt {index} status={status} warm={hot} scoped={scoped} "
                       f"cases={len(numbers)} receipts={len(observed)} unstable={unstable}",
                       file=sys.stderr, flush=True)
+            trace_decision("attempt", index=index, status=status, warm=hot, scoped=scoped,
+                           tests=numbers, stopped=stopped, verdicts=observed, unstable=unstable)
             return status, stopped, observed, timings, unstable
         finally:
             # Each attempt owns a fresh filesystem. The runtime tmpfs has room for
@@ -193,6 +200,8 @@ class ReplaySession:
         selected = set(selection.tests) | protected
         if (not self.collection or not selection.tests or selection.basis in {"static", "shared state"}
                 or time.monotonic() >= self.deadline):
+            trace_decision("replay_skipped", collection=bool(self.collection), mode=selection.basis,
+                           deadline_expired=time.monotonic() >= self.deadline)
             return selected
         native = selection.basis == "layout"
         warm = selection.basis in {"hot", "fixture"}
@@ -214,6 +223,8 @@ class ReplaySession:
             protected = protected | unknown
             work = prepare_replay(selection, self.durations, self.roster, self.times,
                                   budget, self.fixture_sets, protected=protected)
+            trace_decision("replay_plan", budget=budget, run=work.run, held=work.held,
+                           defer=work.defer, protected=sorted(protected))
             if not work.run:
                 return selected
             with TemporaryDirectory(prefix="umbermill-replay-") as name:
@@ -283,5 +294,6 @@ class ReplaySession:
             return finish_replay(selection, work, observed, self.durations, self.roster,
                                  self.fixture_sets, protected=protected,
                                  status="stopped" if status == "stop" else status)
-        except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError) as exc:
+            trace_decision("replay_fallback", error=type(exc).__name__)
             return selected

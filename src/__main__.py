@@ -17,7 +17,7 @@ from .portable import PortableSelector
 from .precision import FieldSelector
 from .replay_planner import plan_patch
 from .replay_schedule import pack
-from .replay_session import ReplaySession
+from .replay_session import ReplaySession, trace_decision
 from .run_cpu import CpuPlacement
 from .scheduler import schedule_tests
 from .selector import Selection, Selector, load_tests
@@ -139,7 +139,10 @@ def main():
                 if trace:
                     began = time.monotonic()
                     print(f"replay {name} {selection.basis} candidates={len(selection.tests)}", file=sys.stderr, flush=True)
+                trace_decision("candidates", commit=name, mode=selection.basis, reason=selection.reason,
+                               tests=selection.tests)
                 chosen = session.choose(selection, patch, needed)
+                trace_decision("selection", commit=name, tests=sorted(chosen))
                 if trace:
                     print(f"replay {name} selected={len(chosen)} elapsed={time.monotonic() - began:.3f}",
                           file=sys.stderr, flush=True)

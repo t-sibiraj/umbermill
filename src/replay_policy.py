@@ -7,6 +7,9 @@ from math import inf, isfinite
 WORKER = 2.0
 LONG = 5.0
 BROAD_FAILURE = 8
+MIN_REPLAY_ALLOWANCE = 1.5
+REPLAY_SHARE = 0.7
+REPLAY_COST_FLOOR = 0.002
 
 
 @dataclass(frozen=True)
@@ -75,7 +78,7 @@ def prepare_replay(
         for n in chosen
         if n not in mandatory
         and isfinite(simulated[n])
-        and cpu[n] <= min(budget, max(0.35, 0.75 * (WORKER + simulated[n])))
+        and cpu[n] <= min(budget, max(MIN_REPLAY_ALLOWANCE, REPLAY_SHARE * (WORKER + simulated[n])))
     }
     fixed = set(chosen) - affordable
     evidence = _related(affordable, {n for n in fixed if simulated[n] > LONG}, roster, fixture_sets)
@@ -83,7 +86,7 @@ def prepare_replay(
         affordable,
         key=lambda n: (
             n not in evidence,
-            -(simulated[n] + 0.001) / cpu[n],
+            -(simulated[n] + REPLAY_COST_FLOOR) / (cpu[n] + REPLAY_COST_FLOOR),
             cpu[n],
             n,
         ),
@@ -121,7 +124,7 @@ def prepare_replay(
         run.difference_update(replaceable[:cut])
 
     defer = {
-        n for n in run - evidence if simulated[n] <= LONG and cpu[n] > max(0.03, simulated[n] / 2)
+        n for n in run - evidence if cpu[n] > max(0.03, simulated[n] / 2)
     }
     return ReplayWork(
         tuple(n for n in chosen if n in run),
