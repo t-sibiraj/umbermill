@@ -146,6 +146,15 @@ class ReplaySession:
             status, stopped, events = self.processes.run(job, scratch / f"job-{index}.json", limits,
                                                          available, self.deadline, hot)
             observed, timings, unstable = _outcomes(events, numbers, status == "complete")
+            state = next(((i, row[1]) for i, row in enumerate(events)
+                          if row[0] == "state" and row[1] in numbers), None)
+            if state is not None and not any(row[0] == "unattributed_failure" for row in events):
+                offset, first_affected = state
+                prefix, costs, broken = _outcomes(events[:offset], numbers, complete=False)
+                if not broken:
+                    status, stopped = "state", first_affected
+                    observed, timings = merge_outcomes(prefix, observed), costs
+                    unstable = False
             if os.environ.get("UMBERMILL_REPLAY_TRACE") == "1":
                 print(f"attempt {index} status={status} warm={hot} scoped={scoped} "
                       f"cases={len(numbers)} receipts={len(observed)} unstable={unstable}",
@@ -155,6 +164,12 @@ class ReplaySession:
             # Each attempt owns a fresh filesystem. The runtime tmpfs has room for
             # one backing tree, so clean it before trying a different interpreter.
             shutil.rmtree(tree, ignore_errors=True)
+
+    def _after_state(self, selected, protected, observed, first_affected):
+        boundary = self.order[first_affected]
+        prefix_passes = {n for n, verdict in observed.items() if verdict == "pass" and n not in protected}
+        later = {n for n in self.roster if self.order.get(n, boundary) >= boundary}
+        return (selected - prefix_passes) | protected | later
 
     def choose(self, selection, patch, protected):
         selected = set(selection.tests) | protected
@@ -189,6 +204,8 @@ class ReplaySession:
                 status, stopped, observed, timings, unstable = self._run(
                     scratch, 0, changes, patch, work.run, work.defer, budget, hot, False, native,
                     scoped=scoped)
+                if status == "state":
+                    return self._after_state(selected, protected, observed, stopped)
                 if unstable:
                     return selected
                 for test, spent in timings.items():
@@ -199,6 +216,8 @@ class ReplaySession:
                     status, stopped, cold, _, unstable = self._run(
                         scratch, 1, changes, patch, work.run, work.defer,
                         budget - (cpu() - started), False, False, native, scoped=scoped)
+                    if status == "state":
+                        return self._after_state(selected, protected, cold, stopped)
                     if unstable:
                         return selected
                     observed = merge_outcomes({n: v for n, v in observed.items() if v == "failed"}, cold)
@@ -210,9 +229,11 @@ class ReplaySession:
                     balance = budget - (cpu() - started)
                     charge = .35 + sum(self.times[n] for n in unrun)
                     if unrun and charge < balance and self._saving(pending, unrun) > charge:
-                        _, other_stop, later, _, unsafe = self._run(
+                        retry_status, other_stop, later, _, unsafe = self._run(
                             scratch, 2, changes, patch, unrun, (), balance, False, False, native,
                             scoped=scoped)
+                        if retry_status == "state":
+                            return self._after_state(selected, protected, later, other_stop)
                         if unsafe:
                             return selected
                         if other_stop is not None and later.get(other_stop) != "failed":
@@ -224,9 +245,11 @@ class ReplaySession:
                     balance = budget - (cpu() - started)
                     if (deferred and balance > .25
                             and self._saving(pending, deferred) > .35 + sum(self.times[n] for n in deferred)):
-                        retry_status, _, later, _, still_safe = self._run(
+                        retry_status, follow_state, later, _, still_safe = self._run(
                             scratch, 2, changes, patch, deferred, (), balance, False, False, native,
                             scoped=scoped)
+                        if retry_status == "state":
+                            return self._after_state(selected, protected, later, follow_state)
                         if not still_safe and retry_status == "complete":
                             observed = merge_outcomes(observed, later)
                     balance = budget - (cpu() - started)
@@ -235,8 +258,10 @@ class ReplaySession:
                     abbr = self._abbreviated(selection, work, patch, paths, preliminary, balance)
                     if abbr:
                         _, test, units, cost = abbr
-                        extra_status, _, extra, _, unstable = self._run(
+                        extra_status, stage_state, extra, _, unstable = self._run(
                             scratch, 3, changes, patch, (test,), (), cost, False, units, native, stage=True)
+                        if extra_status == "state":
+                            return self._after_state(selected, protected, extra, stage_state)
                         if not unstable and extra_status == "complete":
                             observed = merge_outcomes(observed, extra)
             return finish_replay(selection, work, observed, self.durations, self.roster,
