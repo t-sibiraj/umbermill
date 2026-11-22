@@ -1,6 +1,7 @@
 """Collect bounded verdicts for one planned patch and finalize its schedule."""
 
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -145,6 +146,10 @@ class ReplaySession:
             status, stopped, events = self.processes.run(job, scratch / f"job-{index}.json", limits,
                                                          available, self.deadline, hot)
             observed, timings, unstable = _outcomes(events, numbers, status == "complete")
+            if os.environ.get("UMBERMILL_REPLAY_TRACE") == "1":
+                print(f"attempt {index} status={status} warm={hot} scoped={scoped} "
+                      f"cases={len(numbers)} receipts={len(observed)} unstable={unstable}",
+                      file=sys.stderr, flush=True)
             return status, stopped, observed, timings, unstable
         finally:
             # Each attempt owns a fresh filesystem. The runtime tmpfs has room for

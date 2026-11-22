@@ -289,7 +289,8 @@ def _decision(data, changes, patch):
         edit = edits[0]
         position = _trivia(data, edit)
         if position is not None:
-            return position, "static", "equivalent code and source-position observers", False
+            basis = "fresh" if position else "static"
+            return position, basis, "equivalent code and source-position observers", False
         predicate = _predicate(data, edit)
         if predicate is not None:
             if predicate:
