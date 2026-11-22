@@ -14,6 +14,7 @@ import time
 from .patches import apply_change
 from .probe_worker import cpu
 from .replay_limits import ReplayMemory
+from .replay_trace import trace_decision
 
 WORKER = Path(__file__).with_name("verification_worker.py")
 
@@ -135,9 +136,20 @@ class Processes:
                     rc = process.returncode
                     break
                 now = cpu()
-                if (time.monotonic() >= finish_time or now-start >= budget or
-                        memory.over(process.pid if process is not None else None) or
-                        (active is not None and now-item_start > limits[active])):
+                if time.monotonic() >= finish_time:
+                    limit = "wall"
+                elif now - start >= budget:
+                    limit = "replay_cpu"
+                elif memory.over(process.pid if process is not None else None):
+                    limit = "memory"
+                elif active is not None and now - item_start > limits[active]:
+                    limit = "test_cpu"
+                else:
+                    limit = None
+                if limit:
+                    trace_decision("watchdog", limit=limit, test=active, warm=hot,
+                                   replay_cpu=round(now - start, 4),
+                                   test_cpu=round(now - item_start, 4) if active is not None else None)
                     return "stop", active, events
                 time.sleep(.015)
             observe()

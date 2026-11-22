@@ -13,14 +13,10 @@ from .patches import parse_patch
 from .probe_worker import cpu
 from .replay_policy import finish_replay, merge_outcomes, prepare_replay
 from .replay_schedule import pack
+from .replay_trace import trace_decision
 from .scheduler import evaluate_schedule
 from .verification_process import Processes, prepare_tree
 from .verification_units import eligible as has_units
-
-
-def trace_decision(event, **details):
-    if os.environ.get("UMBERMILL_REPLAY_TRACE") == "2":
-        print(json.dumps({"event": event, **details}, separators=(",", ":")), file=sys.stderr, flush=True)
 
 
 def _collection(maps, roster):

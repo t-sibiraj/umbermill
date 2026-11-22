@@ -17,7 +17,8 @@ from .portable import PortableSelector
 from .precision import FieldSelector
 from .replay_planner import plan_patch
 from .replay_schedule import pack
-from .replay_session import ReplaySession, trace_decision
+from .replay_session import ReplaySession
+from .replay_trace import trace_decision
 from .run_cpu import CpuPlacement
 from .scheduler import schedule_tests
 from .selector import Selection, Selector, load_tests
