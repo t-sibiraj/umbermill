@@ -36,6 +36,38 @@ def settings():
             sys.getswitchinterval(), os.getcwd(), tuple(warnings.filters), registrations)
 
 
+def direct_or_pytest(job, job_path, numbers, event, clock):
+    from umbermill import direct_runner
+
+    tree = Path(job["tree"])
+    if not direct_runner.candidate(job, tree):
+        return False
+    tasks = Path("/proc/self/task")
+    if not tasks.is_dir() or len(os.listdir(tasks)) != 1:
+        return False
+    # Collection imports production code. A rejected child may already have
+    # modified its Python state or its files, so restart pytest from a clean tree.
+    pid = os.fork()
+    if pid == 0:
+        try:
+            completed = direct_runner.run(job, numbers, event, clock, settings)
+            os._exit(0 if completed else 10)
+        except BaseException:
+            os._exit(2)
+    _, status = os.waitpid(pid, 0)
+    if os.waitstatus_to_exitcode(status) == 0 or Path(job["journal"]).stat().st_size:
+        return True
+    from umbermill.verification_process import prepare_tree
+    from umbermill.patches import parse_patch
+
+    clean = tree.with_name(tree.name + "-pytest")
+    if not prepare_tree(Path(job["base"]), clean, parse_patch(job["patch"])):
+        return True
+    cold_job = job_path.with_suffix(".pytest-job")
+    cold_job.write_text(json.dumps(dict(job, tree=str(clean), direct=False)))
+    os.execv(sys.executable, [sys.executable, "-I", "-B", str(Path(__file__).resolve()), str(cold_job)])
+
+
 def replay(job_path):
     job = json.loads(job_path.read_bytes())
     tree = Path(job["tree"])
@@ -65,8 +97,7 @@ def replay(job_path):
 
         lazy_health = defer_libraries()
     cache = None if native_only else extension("executor_cache")
-    if cache is not None:
-        cache.install_executor_cache(tree, paths, tuple(numbers))
+    cache_installed = cache is not None and cache.install_executor_cache(tree, paths, tuple(numbers))
     unit = extension("verification_units") if job["units"] else None
     reducer = unit.replay_plugin(base, tree, job["patch"], tuple(numbers), Path(job["maps"])) if unit else None
     tokens = None if native_only else extension("token_replay")
@@ -74,6 +105,11 @@ def replay(job_path):
     with open(job["journal"], "w", buffering=1) as journal:
         def event(*values):
             journal.write(json.dumps(values, separators=(",", ":")) + "\n")
+
+        if (job.get("direct") and not cache_installed and not lazy_health and not reducer
+                and not (tokens and any(tokens.eligible(node, paths) for node in numbers))
+                and direct_or_pytest(job, job_path, numbers, event, cpu)):
+            return
 
         class Reporter:
             def __init__(self):
